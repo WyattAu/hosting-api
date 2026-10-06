@@ -3,7 +3,6 @@
 #![allow(clippy::expect_used)]
 #![allow(clippy::unwrap_used)]
 // The fixture uses process env to signal stub behaviour to compose stubs.
-#![allow(clippy::union_copy)]
 //! by `testkit::TestServer` (dogfood).
 //!
 //! The fixture mirrors what `ops/tenant-provision.sh` creates on disk:
@@ -26,7 +25,7 @@ use metrics_kit::Registry;
 /// local copy keeps the repo on crates.io-only dependencies.
 struct TestServer {
     addr: std::net::SocketAddr,
-    handle: tokio::task::JoinHandle<()>,
+    _handle: tokio::task::JoinHandle<()>, // kept alive: dropping aborts the server
 }
 
 impl TestServer {
@@ -40,7 +39,7 @@ impl TestServer {
                 .await
                 .expect("server failed");
         });
-        Self { addr, handle }
+        Self { addr, _handle: handle }
     }
 
     fn base_url(&self) -> String {

@@ -7,7 +7,7 @@
 //! timeout, and captured stderr for the caller.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -152,6 +152,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::panic)]
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn gate_is_exclusive_per_tenant() {
