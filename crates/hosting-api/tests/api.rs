@@ -137,6 +137,7 @@ async fn serve(root: PathBuf, backup_script: PathBuf) -> String {
             registry,
             jobs_dir.path().to_path_buf(),
             Some("test-token".to_string()),
+            false,
         )
         .expect("state from fixture"),
     );

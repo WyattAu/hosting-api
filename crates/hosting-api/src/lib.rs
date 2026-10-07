@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -54,6 +54,10 @@ pub struct AppState {
     pub jobs: Arc<JobStore>,
     /// Bearer token for `/api/*` (`None` = API closed).
     pub api_token: Option<String>,
+    /// Trust `X-Forwarded-User` from the edge proxy for audit identity.
+    /// Only enable when the API is unreachable except through the edge.
+    pub trust_proxy_headers: bool,
+
     /// Total backup requests accepted.
     metric_backups_total: Counter,
     /// Backup failures (non-zero exit or error).
@@ -69,12 +73,14 @@ impl AppState {
     /// Propagates [`tenants::TenantRoot`] validation and metric
     /// registration errors.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_root: PathBuf,
         backup_script: PathBuf,
         registry: Arc<Registry>,
         jobs_dir: PathBuf,
         api_token: Option<String>,
+        trust_proxy_headers: bool,
     ) -> Result<Self, error::ApiError> {
         let root = TenantRoot::new(tenant_root)?;
         let metric_backups_total = registry
@@ -106,6 +112,7 @@ impl AppState {
             registry,
             jobs,
             api_token,
+            trust_proxy_headers,
             metric_backups_total,
             metric_backup_failures,
             metric_tenants_up,
@@ -155,6 +162,22 @@ pub struct BackupQuery {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Edge-forwarded identity for the audit trail. Only meaningful when
+/// `trust_proxy_headers` is on; an unauthenticated caller able to reach
+/// the API directly could forge this header, which is why the default is
+/// off and the listener is loopback-only.
+fn forwarded_user(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("X-Forwarded-User")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 128
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-._@".contains(c))
+        })
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
@@ -224,14 +247,22 @@ async fn get_tenant(
 async fn trigger_backup(
     State(state): State<Arc<AppState>>,
     Path(tenant): Path<String>,
-    query: Query<BackupQuery>,
+    Query(query): Query<BackupQuery>,
+    headers: HeaderMap,
 ) -> Result<(StatusCode, Json<serde_json::Value>), error::ApiError> {
     // Validate the tenant before submitting so unknown slugs get a clean
     // 404 rather than a job that fails later.
     state.root.tenant_dir(&tenant)?;
 
     let offsite = query.offsite.unwrap_or(false);
-    tracing::info!(tenant = %tenant, offsite, "backup requested");
+    // Identity arrives via the edge proxy; only trusted when the process
+    // was configured accordingly (loopback + edge-only exposure).
+    let requested_by = if state.trust_proxy_headers {
+        forwarded_user(&headers)
+    } else {
+        None
+    };
+    tracing::info!(tenant = %tenant, offsite, requested_by = ?requested_by, "backup requested");
     state.metric_backups_total.inc();
 
     match jobs::spawn_backup_job(
@@ -240,6 +271,7 @@ async fn trigger_backup(
         &state.backup_script,
         &tenant,
         offsite,
+        requested_by,
     )
     .await
     {

@@ -41,6 +41,10 @@ pub struct JobRecord {
     pub duration_secs: Option<u64>,
     /// Error message for non-terminal failures (spawn error, timeout).
     pub error: Option<String>,
+    /// Identity forwarded by the edge proxy (`X-Forwarded-User`), when the
+    /// API runs with `TRUST_PROXY_HEADERS=true`. Absent for the nightly
+    /// sweep (recorded as `nightly-sweep` by the caller instead).
+    pub requested_by: Option<String>,
 }
 
 impl JobRecord {
@@ -57,6 +61,7 @@ impl JobRecord {
             stderr_tail: None,
             duration_secs: None,
             error: None,
+            requested_by: None,
         }
     }
 
@@ -177,9 +182,11 @@ impl JobStore {
         &self,
         tenant: &str,
         offsite: bool,
+        requested_by: Option<&str>,
     ) -> Result<String, crate::error::ApiError> {
         let id = new_job_id();
-        let record = JobRecord::new(tenant, offsite, id.clone());
+        let mut record = JobRecord::new(tenant, offsite, id.clone());
+        record.requested_by = requested_by.map(str::to_string);
         {
             let mut jobs = self.jobs.lock().await;
             jobs.insert(id.clone(), record.clone());
@@ -272,13 +279,14 @@ pub async fn spawn_backup_job(
     script: &Path,
     tenant: &str,
     offsite: bool,
+    requested_by: Option<&str>,
 ) -> Result<String, crate::error::ApiError> {
     // Validate before submitting so unknown slugs 404 cleanly.
     let script = script.to_path_buf();
     let store = Arc::clone(store);
     let gate = Arc::clone(gate);
 
-    let id = store.submit(tenant, offsite).await?;
+    let id = store.submit(tenant, offsite, requested_by).await?;
     let job_store = Arc::clone(&store);
     let job_id = id.clone();
     let tenant = tenant.to_string();
@@ -352,7 +360,7 @@ mod tests {
     async fn persists_and_reloads() {
         let dir = tempfile::tempdir().expect("tmp");
         let store = JobStore::open(dir.path()).expect("open");
-        let id = store.submit("acme", true).await.expect("submit");
+        let id = store.submit("acme", true, None).await.expect("submit");
         drop(store);
 
         let reopened = JobStore::open(dir.path()).expect("reopen");
@@ -389,7 +397,7 @@ mod tests {
     async fn list_filters_by_tenant_and_caps() {
         let store = JobStore::open(tempfile::tempdir().expect("tmp").path()).expect("open");
         for t in ["acme", "acme", "globex"] {
-            store.submit(t, false).await.expect("submit");
+            store.submit(t, false, None).await.expect("submit");
         }
         let all = store.list(None, 100).await;
         assert_eq!(all.len(), 3);

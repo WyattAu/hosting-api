@@ -52,7 +52,10 @@ fn nightly_sweep_job(
                     }
                 }
                 // Record each sweep run as a job for the history endpoint.
-                let id = store.submit(&tenant, true).await.unwrap_or_default();
+                let id = store
+                    .submit(&tenant, true, Some("nightly-sweep"))
+                    .await
+                    .unwrap_or_default();
                 store
                     .update(&id, |r| {
                         r.state = "succeeded".to_string();

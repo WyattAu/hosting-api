@@ -52,6 +52,9 @@ async fn main() {
     let api_token = std::env::var("HOSTING_API_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
+    let trust_proxy_headers = std::env::var("TRUST_PROXY_HEADERS")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
 
     if api_token.is_none() {
         tracing::warn!("HOSTING_API_TOKEN not set — /api/* is CLOSED (fail closed)");
@@ -63,6 +66,7 @@ async fn main() {
         telemetry.metrics(),
         jobs_dir,
         api_token,
+        trust_proxy_headers,
     ) {
         Ok(state) => Arc::new(state),
         Err(e) => {
