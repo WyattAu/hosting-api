@@ -29,7 +29,7 @@ multiple_crate_versions = "allow"
 [workspace.dependencies]
 # Dogfood: the estate's own crates, published on crates.io.
 telemetry-init = "0.1"
-metrics-kit = "0.1"  # align with telemetry-init 0.1.1 (0.2 dep not yet republished upstream)
+metrics-kit = "0.2"  # telemetry-init 0.1.2 (republish wave) aligns on 0.2
 worker-kit = { version = "0.3", features = ["cron"] }
 shutdown-kit = "0.3"
 
