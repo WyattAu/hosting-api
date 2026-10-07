@@ -12,7 +12,7 @@
 //! enforces that because the secret fields are private to this module.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -119,6 +119,13 @@ impl TenantRoot {
             )));
         }
         Ok(Self(path))
+    }
+
+    /// The root path itself (for components that re-validate on their own,
+    /// e.g. the nightly sweep's supervisor closure).
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
     }
 
     /// Tenant directory for a slug, rejected unless it is a real,

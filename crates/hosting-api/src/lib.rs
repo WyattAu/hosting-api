@@ -18,8 +18,11 @@
 //!
 //! Secrets from `.credentials` are parsed server-side but never serialised.
 
+pub mod auth;
 pub mod backup;
 pub mod error;
+pub mod jobs;
+pub mod nightly;
 pub mod tenants;
 
 use std::path::PathBuf;
@@ -34,6 +37,7 @@ use metrics_kit::{Counter, Gauge, Registry};
 use serde::Deserialize;
 
 use crate::backup::BackupGate;
+use crate::jobs::JobStore;
 use crate::tenants::TenantRoot;
 
 /// Shared handler state.
@@ -43,9 +47,13 @@ pub struct AppState {
     /// Path to `tenant-backup.sh`.
     backup_script: PathBuf,
     /// Per-tenant backup mutual exclusion.
-    gate: Arc<BackupGate>,
+    pub gate: Arc<BackupGate>,
     /// Metrics registry (dogfood: `metrics-kit` via `telemetry-init`).
     registry: Arc<Registry>,
+    /// Durable backup-job history.
+    pub jobs: Arc<JobStore>,
+    /// Bearer token for `/api/*` (`None` = API closed).
+    pub api_token: Option<String>,
     /// Total backup requests accepted.
     metric_backups_total: Counter,
     /// Backup failures (non-zero exit or error).
@@ -60,10 +68,13 @@ impl AppState {
     /// # Errors
     /// Propagates [`tenants::TenantRoot`] validation and metric
     /// registration errors.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_root: PathBuf,
         backup_script: PathBuf,
         registry: Arc<Registry>,
+        jobs_dir: PathBuf,
+        api_token: Option<String>,
     ) -> Result<Self, error::ApiError> {
         let root = TenantRoot::new(tenant_root)?;
         let metric_backups_total = registry
@@ -87,25 +98,50 @@ impl AppState {
                 &[],
             )
             .map_err(|e| error::ApiError::Config(e.to_string()))?;
+        let jobs = Arc::new(JobStore::open(jobs_dir)?);
         Ok(Self {
             root,
             backup_script,
             gate: Arc::new(BackupGate::default()),
             registry,
+            jobs,
+            api_token,
             metric_backups_total,
             metric_backup_failures,
             metric_tenants_up,
         })
     }
 
-    /// Build the application router.
+    /// Tenant root path (for the nightly sweep's re-clone).
+    #[must_use]
+    pub fn tenant_root_path(&self) -> std::path::PathBuf {
+        self.root.path().to_path_buf()
+    }
+
+    /// Backup script path (for the nightly sweep's re-clone).
+    #[must_use]
+    pub fn backup_script_path(&self) -> PathBuf {
+        self.backup_script.clone()
+    }
+
+    /// Build the application router. `/api/*` requires the bearer
+    /// token; `/healthz` and `/metrics` stay open.
     pub fn router(self: Arc<Self>) -> Router {
+        let api = Router::new()
+            .route("/tenants", get(list_tenants))
+            .route("/tenants/{tenant}", get(get_tenant))
+            .route("/tenants/{tenant}/backup", post(trigger_backup))
+            .route("/jobs", get(list_jobs))
+            .route("/jobs/{id}", get(get_job))
+            .route("/tenants/{tenant}/jobs", get(list_tenant_jobs))
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&self),
+                auth::require_bearer,
+            ));
         Router::new()
             .route("/healthz", get(healthz))
             .route("/metrics", get(metrics))
-            .route("/api/tenants", get(list_tenants))
-            .route("/api/tenants/{tenant}", get(get_tenant))
-            .route("/api/tenants/{tenant}/backup", post(trigger_backup))
+            .nest("/api", api)
             .with_state(self)
     }
 }
@@ -189,29 +225,56 @@ async fn trigger_backup(
     State(state): State<Arc<AppState>>,
     Path(tenant): Path<String>,
     query: Query<BackupQuery>,
-) -> Result<Json<backup::BackupOutcome>, error::ApiError> {
-    // Validate the tenant before claiming the gate so unknown slugs get a
-    // clean 404 rather than a gate slot.
+) -> Result<(StatusCode, Json<serde_json::Value>), error::ApiError> {
+    // Validate the tenant before submitting so unknown slugs get a clean
+    // 404 rather than a job that fails later.
     state.root.tenant_dir(&tenant)?;
 
     let offsite = query.offsite.unwrap_or(false);
     tracing::info!(tenant = %tenant, offsite, "backup requested");
     state.metric_backups_total.inc();
 
-    match backup::run_backup(&state.gate, &state.backup_script, &tenant, offsite).await {
-        Ok(outcome) => {
-            if outcome.success {
-                tracing::info!(tenant = %tenant, secs = outcome.duration_secs, "backup done");
-            } else {
-                state.metric_backup_failures.inc();
-                tracing::warn!(tenant = %tenant, code = ?outcome.code, "backup script failed");
-            }
-            Ok(Json(outcome))
-        }
+    match jobs::spawn_backup_job(
+        &state.jobs,
+        &state.gate,
+        &state.backup_script,
+        &tenant,
+        offsite,
+    )
+    .await
+    {
+        Ok(job_id) => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "job_id": job_id })),
+        )),
         Err(e) => {
             state.metric_backup_failures.inc();
-            tracing::error!(tenant = %tenant, error = %e, "backup error");
+            tracing::error!(tenant = %tenant, error = %e, "backup submit failed");
             Err(e)
         }
     }
+}
+
+async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<jobs::JobRecord>> {
+    Json(state.jobs.list(None, 100).await)
+}
+
+async fn get_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<jobs::JobRecord>, error::ApiError> {
+    state
+        .jobs
+        .get(&id)
+        .await
+        .map(Json)
+        .ok_or_else(|| error::ApiError::TenantNotFound(format!("job {id}")))
+}
+
+async fn list_tenant_jobs(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+) -> Result<Json<Vec<jobs::JobRecord>>, error::ApiError> {
+    state.root.tenant_dir(&tenant)?;
+    Ok(Json(state.jobs.list(Some(&tenant), 100).await))
 }

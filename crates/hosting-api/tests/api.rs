@@ -39,7 +39,10 @@ impl TestServer {
                 .await
                 .expect("server failed");
         });
-        Self { addr, _handle: handle }
+        Self {
+            addr,
+            _handle: handle,
+        }
     }
 
     fn base_url(&self) -> String {
@@ -49,6 +52,14 @@ impl TestServer {
 
 /// Create a fixture tenant directory with a stub compose wrapper and
 /// credential metadata.
+fn extract_job_id(body: &str) -> String {
+    let marker = "\"job_id\":";
+    let tail = body.rsplit(marker).next().unwrap_or("");
+    tail.trim_start()
+        .trim_matches(|c| c == '"' || c == '}' || c == ' ')
+        .to_string()
+}
+
 fn fixture_tenant(root: &Path, slug: &str, service: &str) {
     let dir = root.join(slug);
     std::fs::create_dir_all(&dir).expect("tenant dir");
@@ -118,7 +129,17 @@ fn fake_backup_script(dir: &Path, exit_code: i32) -> PathBuf {
 
 async fn serve(root: PathBuf, backup_script: PathBuf) -> String {
     let registry = Arc::new(Registry::new());
-    let state = Arc::new(AppState::new(root, backup_script, registry).expect("state from fixture"));
+    let jobs_dir = tempfile::tempdir().expect("jobs tmp");
+    let state = Arc::new(
+        AppState::new(
+            root,
+            backup_script,
+            registry,
+            jobs_dir.path().to_path_buf(),
+            Some("test-token".to_string()),
+        )
+        .expect("state from fixture"),
+    );
     let server = TestServer::new(state.router()).await;
     server.base_url()
 }
@@ -163,10 +184,23 @@ async fn backup_runs_script_and_reports_outcome() {
     let url = serve(root, script).await;
 
     let body = reqwest_post(&format!("{url}/api/tenants/acme/backup")).await;
-    assert!(body.contains("\"success\":true"), "outcome: {body}");
+    let job_id = extract_job_id(&body);
+    assert!(!job_id.is_empty(), "202 + job id expected, got: {body}");
+
+    // Async: poll the job endpoint until terminal.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut record = String::new();
+    while std::time::Instant::now() < deadline {
+        record = reqwest_get(&format!("{url}/api/jobs/{job_id}")).await;
+        if record.contains("\"succeeded\"") || record.contains("\"failed\"") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(record.contains("\"succeeded\""), "final record: {record}");
     assert!(
-        body.contains("snapshotting acme"),
-        "stderr captured: {body}"
+        record.contains("snapshotting acme"),
+        "stderr captured: {record}"
     );
 }
 
@@ -178,8 +212,19 @@ async fn backup_script_failure_is_reported_not_500() {
     let url = serve(root, script).await;
 
     let body = reqwest_post(&format!("{url}/api/tenants/acme/backup")).await;
-    assert!(body.contains("\"success\":false"), "outcome: {body}");
-    assert!(body.contains("\"code\":3"), "exit code: {body}");
+    let job_id = extract_job_id(&body);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut record = String::new();
+    while std::time::Instant::now() < deadline {
+        record = reqwest_get(&format!("{url}/api/jobs/{job_id}")).await;
+        if record.contains("\"failed\"") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(record.contains("\"state\":\"failed\""), "record: {record}");
+    assert!(record.contains("\"exit_code\":3"), "exit code: {record}");
 }
 
 #[tokio::test]
@@ -195,7 +240,10 @@ async fn metrics_endpoint_exposes_series() {
 // deps minimal by using it directly here as a dev-dependency) -----------
 
 async fn reqwest_get(url: &str) -> String {
-    reqwest::get(url)
+    reqwest::Client::new()
+        .get(url)
+        .bearer_auth("test-token")
+        .send()
         .await
         .expect("GET")
         .text()
@@ -204,12 +252,20 @@ async fn reqwest_get(url: &str) -> String {
 }
 
 async fn reqwest_status(url: &str) -> u16 {
-    reqwest::get(url).await.expect("GET").status().as_u16()
+    reqwest::Client::new()
+        .get(url)
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .expect("GET")
+        .status()
+        .as_u16()
 }
 
 async fn reqwest_post(url: &str) -> String {
     reqwest::Client::new()
         .post(url)
+        .bearer_auth("test-token")
         .send()
         .await
         .expect("POST")

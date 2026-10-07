@@ -30,12 +30,15 @@ multiple_crate_versions = "allow"
 # Dogfood: the estate's own crates, published on crates.io.
 telemetry-init = "0.1"
 metrics-kit = "0.1"  # align with telemetry-init 0.1.1 (0.2 dep not yet republished upstream)
+worker-kit = { version = "0.3", features = ["cron"] }
+shutdown-kit = "0.3"
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "process", "time"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+chrono = "0.4"
 tracing = "0.1"
 
 [profile.release]
