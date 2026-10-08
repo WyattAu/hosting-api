@@ -280,6 +280,7 @@ pub async fn spawn_backup_job(
     tenant: &str,
     offsite: bool,
     requested_by: Option<String>,
+    duration_metric: Option<metrics_kit::Histogram>,
 ) -> Result<String, crate::error::ApiError> {
     // Validate before submitting so unknown slugs 404 cleanly.
     let script = script.to_path_buf();
@@ -301,6 +302,14 @@ pub async fn spawn_backup_job(
             .await;
         match backup::run_backup(&gate, &script, &tenant, offsite).await {
             Ok(outcome) => {
+                if outcome.success {
+                    if let Some(h) = duration_metric.as_ref() {
+                        #[allow(clippy::cast_precision_loss)]
+                        h.observe(f64::from(
+                            u32::try_from(outcome.duration_secs).unwrap_or(u32::MAX),
+                        ));
+                    }
+                }
                 job_store
                     .update(&id, |r| {
                         r.state = if outcome.success {

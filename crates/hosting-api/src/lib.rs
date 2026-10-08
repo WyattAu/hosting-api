@@ -68,6 +68,9 @@ pub struct AppState {
     metric_backup_failures: Counter,
     /// Current count of tenants considered healthy.
     metric_tenants_up: Gauge,
+    /// Backup wall-clock durations (seconds) — feeds the SLA story in the
+    /// service catalogue ("backup window" promise to customers).
+    metric_backup_duration: metrics_kit::Histogram,
 }
 
 impl AppState {
@@ -108,6 +111,13 @@ impl AppState {
                 &[],
             )
             .map_err(|e| error::ApiError::Config(e.to_string()))?;
+        let metric_backup_duration = registry
+            .histogram(
+                "hosting_backup_duration_seconds",
+                "Tenant backup wall-clock duration.",
+                &[],
+            )
+            .map_err(|e| error::ApiError::Config(e.to_string()))?;
         let jobs = Arc::new(JobStore::open(jobs_dir)?);
         let passkeys = passkeys::PasskeyState::from_env()?;
         Ok(Self {
@@ -122,6 +132,7 @@ impl AppState {
             metric_backups_total,
             metric_backup_failures,
             metric_tenants_up,
+            metric_backup_duration,
         })
     }
 
@@ -292,6 +303,7 @@ async fn trigger_backup(
         &tenant,
         offsite,
         requested_by,
+        Some(state.metric_backup_duration.clone()),
     )
     .await
     {
