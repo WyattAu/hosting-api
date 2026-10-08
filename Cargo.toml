@@ -32,6 +32,10 @@ telemetry-init = "0.1"
 metrics-kit = "0.2"  # telemetry-init 0.1.2 (republish wave) aligns on 0.2
 worker-kit = { version = "0.3", features = ["cron"] }
 shutdown-kit = "0.3"
+webauthn-kit = { version = "0.3", features = ["serde"] }
+# Direct dep for parsing attestation objects (the kit exposes helpers
+# but not the Value type itself — second upstream gap, iteration 5).
+ciborium = "0.2"
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "process", "time"] }
 axum = "0.8"

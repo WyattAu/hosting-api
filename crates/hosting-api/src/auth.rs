@@ -11,7 +11,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
@@ -30,28 +30,27 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Check a request's bearer token against the configured token.
+/// `false` when no token is configured (fail closed).
+#[allow(clippy::unused_async)] // kept async to match the middleware surface
+pub async fn bearer_matches(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.api_token.as_deref() else {
+        return false;
+    };
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|token| ct_eq(token.as_bytes(), expected.as_bytes()))
+}
+
 /// Axum middleware: verify `Authorization: Bearer <token>`.
 pub async fn require_bearer(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(expected) = state.api_token.as_deref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "API token not configured (HOSTING_API_TOKEN empty)",
-        )
-            .into_response();
-    };
-
-    let presented = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    let ok = presented.is_some_and(|token| ct_eq(token.as_bytes(), expected.as_bytes()));
-    if !ok {
+    if !bearer_matches(&state, req.headers()).await {
         tracing::warn!("unauthorized API request");
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }

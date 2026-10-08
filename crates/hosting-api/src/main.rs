@@ -8,6 +8,10 @@
 //! - `HOSTING_JOBS_DIR` — durable job history (default `/srv/backups/jobs`)
 //! - `HOSTING_API_TOKEN` — bearer token for `/api/*` (required; empty
 //!   closes the API)
+//! - `HOSTING_PASSKEY_RP_ID` / `HOSTING_PASSKEY_ORIGIN` — enable passkey
+//!   step-up ceremonies when both are set (off by default)
+//! - `HOSTING_PASSKEYS_FILE` — credential store (default
+//!   `/etc/sis-hosting/passkeys.json`)
 //! - `RUST_LOG` — tracing filter (default `info`)
 //!
 //! Bind to loopback: this API has no auth of its own by design; the edge

@@ -27,6 +27,11 @@ pub enum ApiError {
     /// The platform is misconfigured (missing binary, bad root path).
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// A capability is intentionally not configured on this deployment
+    /// (e.g. passkeys without `HOSTING_PASSKEY_*` env).
+    #[error("not configured on this deployment")]
+    NotConfigured,
 }
 
 impl IntoResponse for ApiError {
@@ -37,6 +42,7 @@ impl IntoResponse for ApiError {
             }
             ApiError::Subprocess(_) => (StatusCode::BAD_GATEWAY, "subprocess_failed"),
             ApiError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "io_error"),
+            ApiError::NotConfigured => (StatusCode::SERVICE_UNAVAILABLE, "not_configured"),
             ApiError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
         };
         // BackupInProgress is really 409; adjust before responding.

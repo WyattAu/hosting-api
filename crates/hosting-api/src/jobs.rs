@@ -247,7 +247,7 @@ impl JobStore {
     }
 }
 
-fn new_job_id() -> String {
+pub(crate) fn new_job_id() -> String {
     // 16 random bytes, hex — uuid crate is not worth the dep for one id.
     use std::fmt::Write as _;
     let raw = std::time::SystemTime::now()
