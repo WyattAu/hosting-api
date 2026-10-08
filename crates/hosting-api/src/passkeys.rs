@@ -19,9 +19,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use webauthn_kit::{
-    base64_decode_urlsafe, cbor_bytes, cbor_map_entries, parse_cose_key, verify_authentication,
-    verify_registration, AuthenticationParams, AuthenticationResponse, ChallengeStore,
-    CredentialPolicy, RegistrationResponse, UserVerificationPolicy, WebauthnConfig,
+    verify_authentication, verify_registration, AuthenticationParams, AuthenticationResponse,
+    ChallengeStore, CredentialPolicy, RegistrationResponse, UserVerificationPolicy, WebauthnConfig,
     WebauthnCredential,
 };
 
@@ -253,15 +252,11 @@ pub async fn register_finish(
     )
     .map_err(|e| ApiError::Config(format!("registration rejected: {e}")))?;
 
-    // UPSTREAM GAP (loop finding): RegistrationResult does not carry the
-    // COSE public key, so the integrator must extract it from the
-    // attestation object. Done here with the kit's own exported CBOR
-    // helpers — flagged for webauthn-kit to include in the result.
-    let cose = extract_registration_public_key(&response.attestation_object)?;
-
+    // webauthn-kit 0.4 returns the attested COSE key directly (PR #9) —
+    // the ~40-line consumer-side extraction from iteration 5 is gone.
     let cred = WebauthnCredential {
         credential_id: result.credential_id,
-        public_key_cose: cose,
+        public_key_cose: result.public_key_cose,
         sign_count: 0,
         device_name: result.device_name,
         registered_at: now_secs(),
@@ -276,55 +271,6 @@ pub async fn register_finish(
         "credential_id": cred.credential_id,
         "attestation_trust": format!("{:?}", result.attestation.trust_level),
     }))
-}
-
-/// Extract the attested COSE public key from an attestation object.
-///
-/// Layout: CBOR map `{fmt: text`, attStmt: map, authData: bytes}; authData =
-/// rpIdHash(32) + flags(1) + signCount(4) + [aaguid(16) + credIdLen(2) +
-/// credId] + COSE key (CBOR). `WebAuthn` L2 §6.4.1.
-fn extract_registration_public_key(attestation_object_b64: &str) -> Result<Vec<u8>, ApiError> {
-    let raw = base64_decode_urlsafe(attestation_object_b64)
-        .map_err(|e| ApiError::Config(format!("attestation base64: {e}")))?;
-    let value: ciborium::Value = ciborium::de::from_reader(raw.as_slice())
-        .map_err(|e| ApiError::Config(format!("attestation CBOR: {e}")))?;
-    let entries = cbor_map_entries(&value)
-        .ok_or_else(|| ApiError::Config("attestation object is not a CBOR map".to_string()))?;
-    let auth_data = entries
-        .iter()
-        .find(|(k, _)| *k == 3) // "authData" in CTAP2 canonical ordering
-        .and_then(|(_, v)| cbor_bytes(v))
-        .ok_or_else(|| ApiError::Config("authData missing".to_string()))?;
-
-    let flags = auth_data
-        .get(32)
-        .copied()
-        .ok_or_else(|| ApiError::Config("authData truncated".to_string()))?;
-    if flags & 0x40 == 0 {
-        // AT bit: no attested credential data (e.g. resident-key flow) —
-        // this spike only enrols non-discoverable credentials.
-        return Err(ApiError::Config(
-            "no attested credential data (AT flag clear)".to_string(),
-        ));
-    }
-    // aaguid(16) + credIdLen(2) start at offset 37.
-    let len_bytes = auth_data
-        .get(53..55)
-        .ok_or_else(|| ApiError::Config("credential data truncated".to_string()))?;
-    let hi = len_bytes.first().copied().unwrap_or(0);
-    let lo = len_bytes.get(1).copied().unwrap_or(0);
-    let cred_len = u16::from_be_bytes([hi, lo]) as usize;
-    #[allow(clippy::indexing_slicing)] // length proven by the get(53..55) check above
-    let cose_start = 55 + cred_len;
-    if auth_data.len() < cose_start {
-        return Err(ApiError::Config("COSE key truncated".to_string()));
-    }
-    let cose = auth_data
-        .get(cose_start..)
-        .ok_or_else(|| ApiError::Config("COSE key truncated".to_string()))?;
-    // Validate it parses as a COSE key (rejects garbage early).
-    parse_cose_key(cose).map_err(|e| ApiError::Config(format!("COSE key: {e}")))?;
-    Ok(cose.to_vec())
 }
 
 /// Authentication ceremony, step 1: issue `get()` options.
