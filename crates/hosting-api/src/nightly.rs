@@ -53,7 +53,7 @@ fn nightly_sweep_job(
                 }
                 // Record each sweep run as a job for the history endpoint.
                 let id = store
-                    .submit(&tenant, true, Some("nightly-sweep"))
+                    .submit(&tenant, true, Some("nightly-sweep".to_string()))
                     .await
                     .unwrap_or_default();
                 store

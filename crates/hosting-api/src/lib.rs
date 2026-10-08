@@ -272,12 +272,15 @@ async fn trigger_backup(
     state.root.tenant_dir(&tenant)?;
 
     let offsite = query.offsite.unwrap_or(false);
-    // Identity arrives via the edge proxy; only trusted when the process
-    // was configured accordingly (loopback + edge-only exposure).
-    let requested_by = if state.trust_proxy_headers {
-        forwarded_user(&headers)
-    } else {
-        None
+    // Identity resolution order: edge-forwarded user (when trusted — the
+    // edge is the authenticated front door), else the passkey session
+    // (the dashboard's direct path), else anonymous.
+    let requested_by = match forwarded_user(&headers).filter(|_| state.trust_proxy_headers) {
+        Some(user) => Some(user.to_string()),
+        None => match state.passkeys.as_ref() {
+            Some(pk) => pk.identity_from_header(&headers).await,
+            None => None,
+        },
     };
     tracing::info!(tenant = %tenant, offsite, requested_by = ?requested_by, "backup requested");
     state.metric_backups_total.inc();

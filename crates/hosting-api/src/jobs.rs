@@ -182,11 +182,11 @@ impl JobStore {
         &self,
         tenant: &str,
         offsite: bool,
-        requested_by: Option<&str>,
+        requested_by: Option<String>,
     ) -> Result<String, crate::error::ApiError> {
         let id = new_job_id();
         let mut record = JobRecord::new(tenant, offsite, id.clone());
-        record.requested_by = requested_by.map(str::to_string);
+        record.requested_by = requested_by;
         {
             let mut jobs = self.jobs.lock().await;
             jobs.insert(id.clone(), record.clone());
@@ -279,7 +279,7 @@ pub async fn spawn_backup_job(
     script: &Path,
     tenant: &str,
     offsite: bool,
-    requested_by: Option<&str>,
+    requested_by: Option<String>,
 ) -> Result<String, crate::error::ApiError> {
     // Validate before submitting so unknown slugs 404 cleanly.
     let script = script.to_path_buf();

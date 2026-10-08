@@ -96,6 +96,15 @@ impl PasskeyState {
         sessions.get(token).map(|(u, _)| u.clone())
     }
 
+    /// Resolve an identity from a passkey session header. Returns None
+    /// unless the token maps to a live session.
+    pub async fn identity_from_header(&self, headers: &axum::http::HeaderMap) -> Option<String> {
+        let token = headers
+            .get("X-Passkey-Session")
+            .and_then(|v| v.to_str().ok())?;
+        self.session_user(token).await
+    }
+
     /// Registration guard: bootstrap rule — the first credential needs no
     /// existing session; later ones do.
     pub async fn may_register(&self, bearer_ok: bool, session: Option<&str>) -> bool {
