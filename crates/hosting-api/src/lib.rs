@@ -15,6 +15,8 @@
 //! | GET | `/api/tenants` | all tenants with live status |
 //! | GET | `/api/tenants/{tenant}` | one tenant |
 //! | POST | `/api/tenants/{tenant}/backup?offsite=true` | trigger backup |
+//! | GET | `/api/usage` | metered usage and price for every tenant |
+//! | GET | `/api/tenants/{tenant}/usage` | metered usage and price for one tenant |
 //!
 //! Secrets from `.credentials` are parsed server-side but never serialised.
 

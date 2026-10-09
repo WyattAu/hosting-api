@@ -33,6 +33,32 @@ TENANT_ROOT=/srv/tenants HOSTING_LISTEN=127.0.0.1:8484 hosting-api
 | GET | `/api/tenants` | all tenants with live compose status |
 | GET | `/api/tenants/{tenant}` | one tenant |
 | POST | `/api/tenants/{tenant}/backup?offsite=true` | run `tenant-backup.sh` (mutually excluded per tenant, 15 min budget) |
+| GET | `/api/usage` | metered usage and price for every tenant |
+| GET | `/api/tenants/{tenant}/usage` | metered usage and price for one tenant |
+
+### Metering
+
+Per-tenant usage is scraped from cAdvisor (`container_cpu_usage_seconds_total`
+for CPU, `container_memory_working_set_bytes` integrated over the scrape
+interval for memory) and attributed by Docker Compose's
+`<project>-<service>-<index>` naming, where the project equals the tenant slug.
+Containers whose project does not match a known tenant are ignored, and
+ambiguous prefixes are never guessed.
+
+Metering is inert until `HOSTING_CADVISOR_URL` is set; the endpoints then
+report `"metering_enabled": false` rather than failing.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HOSTING_CADVISOR_URL` | unset | cAdvisor exposition URL, e.g. `http://127.0.0.1:8080/metrics` |
+| `HOSTING_METERING_CURRENCY` | `GBP` | currency for charges |
+| `HOSTING_CPU_PRICE_PER_CORE_HOUR` | `0.0040` | price of one core-hour |
+| `HOSTING_MEMORY_PRICE_PER_GIB_HOUR` | `0.0005` | price of one gibibyte-hour |
+| `HOSTING_METERING_DISCOUNT_PERCENT` | `0` | discount applied to the combined charge |
+
+Exported series: `hosting_tenant_cpu_core_seconds`,
+`hosting_tenant_memory_gibibyte_seconds`, `hosting_tenant_usage_charge`, each
+labelled with `tenant`.
 
 Credentials metadata is parsed from each tenant's `.credentials` but secrets
 are **structurally excluded** from the API's types — they cannot leak because

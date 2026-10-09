@@ -423,12 +423,17 @@ impl UsageCollector {
             return Ok(HashMap::new());
         };
         let elapsed = now.signed_duration_since(prev_at);
-        if elapsed.num_seconds() <= 0 {
+        // Sub-second intervals are legitimate (two scrapes inside one
+        // second); only time going backwards is an error. Memory
+        // integration is naturally ~0 for a sub-second window while CPU
+        // counter deltas still apply.
+        if elapsed < chrono::TimeDelta::zero() {
             return Err(UsageError::Config(
-                "scrape timestamps must be strictly increasing".to_string(),
+                "scrape timestamps must not go backwards".to_string(),
             ));
         }
-        let seconds = Decimal::from(elapsed.num_seconds());
+        let millis = elapsed.num_milliseconds().max(0);
+        let seconds = Decimal::from(millis) / Decimal::from(1000);
         let gibibytes = Decimal::from(BYTES_PER_GIB);
         for (name, sample) in &current {
             let Some(before) = prev.get(name) else {
@@ -812,10 +817,24 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
     }
 
     #[test]
-    fn non_increasing_timestamps_are_rejected() {
+    fn timestamps_going_backwards_are_rejected() {
         let mut c = UsageCollector::new();
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(5), &roster()).is_ok(), "baseline observe should succeed");
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(5), &roster()).is_err());
+        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(5), &roster()).is_ok());
+        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(4), &roster()).is_err());
+    }
+
+    #[test]
+    fn sub_second_intervals_are_accepted() {
+        let mut c = UsageCollector::new();
+        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster()).is_ok());
+        let later = DateTime::from_timestamp(1_700_000_000 + 250, 0).unwrap_or_default();
+        let totals = c
+            .observe(&parse_cadvisor(CADVISOR_SAMPLE), later, &roster())
+            .unwrap_or_default();
+        assert!(
+            totals.contains_key("acme"),
+            "two scrapes a quarter second apart must be a valid interval"
+        );
     }
 
     #[test]

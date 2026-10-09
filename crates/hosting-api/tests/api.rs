@@ -274,3 +274,186 @@ async fn reqwest_post(url: &str) -> String {
         .await
         .expect("body")
 }
+
+// --- metering endpoints -------------------------------------------------
+//
+// Metering is exercised end to end against a stub cAdvisor exposition
+// endpoint, so the scrape -> attribute -> price path is covered rather
+// than just the parser.
+
+/// Serve a stateful cAdvisor stub: the first scrape reports the baseline
+/// counters, later scrapes report advanced counters, so a delta actually
+/// exists to measure.
+async fn stub_cadvisor() -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/metrics",
+        axum::routing::get({
+            let calls = Arc::clone(&calls);
+            move || {
+                let calls = Arc::clone(&calls);
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    let (cpu, mem) = if n == 0 {
+                        (100, 536_870_912_u64)
+                    } else {
+                        (160, 1_610_612_736_u64)
+                    };
+                    format!(
+                        concat!(
+                            "container_cpu_usage_seconds_total{{cpu=\"total\",id=\"/docker/a\",",
+                            "name=\"acme-paperless-1\"}} {cpu}\n",
+                            "container_memory_working_set_bytes{{id=\"/docker/a\",",
+                            "name=\"acme-paperless-1\"}} {mem}\n",
+                            "container_cpu_usage_seconds_total{{cpu=\"total\",id=\"/docker/b\",",
+                            "name=\"ghost-thing-1\"}} 999\n",
+                        ),
+                        cpu = cpu,
+                        mem = mem
+                    )
+                }
+            }
+        }),
+    );
+    TestServer::new(app).await.base_url()
+}
+
+#[tokio::test]
+async fn usage_endpoints_report_disabled_when_cadvisor_is_unset() {
+    let (root_dir, root) = fixture_root(true);
+    let script = fake_backup_script(root_dir.path(), 0);
+    std::env::remove_var("HOSTING_CADVISOR_URL");
+
+    let base = serve(root, script).await;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!("{base}/api/usage"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .expect("GET /api/usage");
+    assert!(res.status().is_success());
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(body.get("metering_enabled"), Some(&serde_json::json!(false)));
+    assert_eq!(body.get("currency"), Some(&serde_json::json!("GBP")));
+    assert!(
+        body.get("tenants").is_some_and(serde_json::Value::is_array),
+        "tenant rows are still reported: {body}"
+    );
+}
+
+#[tokio::test]
+async fn tenant_usage_requires_the_bearer_token() {
+    let (root_dir, root) = fixture_root(true);
+    let script = fake_backup_script(root_dir.path(), 0);
+    let base = serve(root, script).await;
+
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/tenants/acme/usage"))
+        .send()
+        .await
+        .expect("GET without token");
+    assert!(
+        res.status() == reqwest::StatusCode::UNAUTHORIZED
+            || res.status() == reqwest::StatusCode::FORBIDDEN,
+        "unauthenticated usage must be refused, got {}",
+        res.status()
+    );
+}
+
+#[tokio::test]
+async fn tenant_usage_404s_for_an_unknown_tenant() {
+    let (root_dir, root) = fixture_root(true);
+    let script = fake_backup_script(root_dir.path(), 0);
+    let base = serve(root, script).await;
+
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/tenants/nope/usage"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .expect("GET unknown tenant");
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn metering_scrapes_attributes_and_prices_a_tenant() {
+    let (root_dir, root) = fixture_root(true);
+    let script = fake_backup_script(root_dir.path(), 0);
+    let cadvisor = format!("{}/metrics", stub_cadvisor().await);
+    std::env::set_var("HOSTING_CADVISOR_URL", &cadvisor);
+    std::env::set_var("HOSTING_CPU_PRICE_PER_CORE_HOUR", "0.01");
+    std::env::set_var("HOSTING_MEMORY_PRICE_PER_GIB_HOUR", "0");
+
+    let base = serve(root, script).await;
+    let client = reqwest::Client::new();
+
+    // First call establishes the cAdvisor baseline.
+    let first: serde_json::Value = client
+        .get(format!("{base}/api/tenants/acme/usage"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .expect("first scrape")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(first.get("metering_enabled"), Some(&serde_json::json!(true)));
+    assert!(
+        first.get("usage").is_none_or(serde_json::Value::is_null),
+        "a baseline scrape yields no usage yet: {first}"
+    );
+
+    // Second call folds the new counters into the window. The stub returns
+    // the same body, so the delta is exactly the second sample line.
+    let second: serde_json::Value = client
+        .get(format!("{base}/api/tenants/acme/usage"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .expect("second scrape")
+        .json()
+        .await
+        .expect("json");
+    let cpu = second
+        .get("usage")
+        .and_then(|u| u.get("cpu_core_seconds"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("0");
+    assert!(
+        cpu.parse::<f64>().unwrap_or(-1.0) > 0.0,
+        "cpu usage should be attributed to acme: {second}"
+    );
+    // 60 core-seconds at 0.01/core-hour = 0.0001666... GBP, non-zero.
+    assert!(
+        second
+            .get("charge")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|c| c.parse::<f64>().unwrap_or(0.0) > 0.0),
+        "charge should be priced: {second}"
+    );
+
+    // A container whose project is not a tenant must not be attributed.
+    let summary: serde_json::Value = client
+        .get(format!("{base}/api/usage"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .expect("summary")
+        .json()
+        .await
+        .expect("json");
+    let rows = summary
+        .get("tenants")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        rows.iter().all(|r| r.get("tenant").and_then(serde_json::Value::as_str) != Some("ghost")),
+        "unknown container projects must not become tenants: {summary}"
+    );
+
+    std::env::remove_var("HOSTING_CADVISOR_URL");
+}
