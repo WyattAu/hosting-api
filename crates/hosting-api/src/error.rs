@@ -16,9 +16,17 @@ pub enum ApiError {
     #[error("subprocess failure: {0}")]
     Subprocess(String),
 
+    /// An upstream dependency (cAdvisor) could not be scraped.
+    #[error("upstream failure: {0}")]
+    Upstream(String),
+
     /// Filesystem access failed (missing permissions, vanished directory).
     #[error("io failure: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Metering configuration was invalid.
+    #[error("usage failure: {0}")]
+    Usage(#[from] crate::usage::UsageError),
 
     /// A backup is already running for this tenant.
     #[error("backup already in progress for tenant {0}")]
@@ -41,6 +49,8 @@ impl IntoResponse for ApiError {
                 (StatusCode::NOT_FOUND, "not_found")
             }
             ApiError::Subprocess(_) => (StatusCode::BAD_GATEWAY, "subprocess_failed"),
+            ApiError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream_failed"),
+            ApiError::Usage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "usage_error"),
             ApiError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "io_error"),
             ApiError::NotConfigured => (StatusCode::SERVICE_UNAVAILABLE, "not_configured"),
             ApiError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),

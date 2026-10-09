@@ -25,6 +25,7 @@ pub mod jobs;
 pub mod nightly;
 pub mod passkeys;
 pub mod tenants;
+pub mod usage;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,6 +62,10 @@ pub struct AppState {
     pub trust_proxy_headers: bool,
     /// Passkey ceremonies; `None` when passkeys are not configured.
     pub passkeys: Option<Arc<passkeys::PasskeyState>>,
+    /// cAdvisor exposition URL for per-tenant metering.
+    pub cadvisor_url: Option<String>,
+    /// Metering window state and unit prices.
+    pub meterer: usage::Meterer,
 
     /// Total backup requests accepted.
     metric_backups_total: Counter,
@@ -120,6 +125,11 @@ impl AppState {
             .map_err(|e| error::ApiError::Config(e.to_string()))?;
         let jobs = Arc::new(JobStore::open(jobs_dir)?);
         let passkeys = passkeys::PasskeyState::from_env()?;
+        let cadvisor_url = std::env::var("HOSTING_CADVISOR_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty());
+        let meterer = usage::Meterer::new(cadvisor_url.clone(), usage::MeteringConfig::from_env()?)
+            .with_registry(registry.clone());
         Ok(Self {
             root,
             backup_script,
@@ -129,6 +139,8 @@ impl AppState {
             api_token,
             trust_proxy_headers,
             passkeys,
+            cadvisor_url,
+            meterer,
             metric_backups_total,
             metric_backup_failures,
             metric_tenants_up,
@@ -165,6 +177,8 @@ impl AppState {
             .route("/tenants", get(list_tenants))
             .route("/tenants/{tenant}", get(get_tenant))
             .route("/tenants/{tenant}/backup", post(trigger_backup))
+            .route("/usage", get(get_usage_summary))
+            .route("/tenants/{tenant}/usage", get(get_tenant_usage))
             .route("/jobs", get(list_jobs))
             .route("/jobs/{id}", get(get_job))
             .route("/tenants/{tenant}/jobs", get(list_tenant_jobs))
@@ -445,6 +459,61 @@ async fn pk_me(
         .await
         .ok_or_else(|| error::ApiError::TenantNotFound("session expired".to_string()))?;
     Ok(Json(serde_json::json!({ "user": user })))
+}
+
+/// `GET /api/usage` - every tenant's metering window and its price.
+async fn get_usage_summary(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, error::ApiError> {
+    let tenants = state.root.all();
+    let totals = state
+        .meterer
+        .refresh(&tenants)
+        .await
+        .map_err(|e| error::ApiError::Upstream(e.to_string()))?;
+    let rows: Vec<serde_json::Value> = tenants
+        .iter()
+        .map(|t| {
+            let usage = totals.get(t);
+            let charge = usage
+                .and_then(|u| u.charge(state.meterer.config()).ok())
+                .map(|c| c.amount.to_string());
+            serde_json::json!({
+                "tenant": t,
+                "usage": usage,
+                "charge": charge,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "metering_enabled": state.meterer.enabled(),
+        "cadvisor_url": state.cadvisor_url,
+        "currency": format!("{:?}", state.meterer.config().currency),
+        "tenants": rows,
+    })))
+}
+
+/// `GET /api/tenants/{tenant}/usage` - one tenant's metering window.
+async fn get_tenant_usage(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+) -> Result<Json<serde_json::Value>, error::ApiError> {
+    state.root.tenant_dir(&tenant)?;
+    let totals = state
+        .meterer
+        .refresh(&state.root.all())
+        .await
+        .map_err(|e| error::ApiError::Upstream(e.to_string()))?;
+    let usage = totals.get(&tenant);
+    let charge = usage
+        .and_then(|u| u.charge(state.meterer.config()).ok())
+        .map(|c| c.amount.to_string());
+    Ok(Json(serde_json::json!({
+        "tenant": tenant,
+        "metering_enabled": state.meterer.enabled(),
+        "usage": usage,
+        "charge": charge,
+    })))
 }
 
 async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<jobs::JobRecord>> {

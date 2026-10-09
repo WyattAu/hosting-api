@@ -14,17 +14,20 @@ metrics-kit.workspace = true
 worker-kit.workspace = true
 shutdown-kit.workspace = true
 webauthn-kit.workspace = true
+billing-kit.workspace = true
+rust_decimal = "1"
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json"] }
-tempfile = "3" 
+tempfile = "3"
+rust_decimal_macros = "1"
 
 [lints]
 workspace = true
