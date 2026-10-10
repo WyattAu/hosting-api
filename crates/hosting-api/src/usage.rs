@@ -747,9 +747,8 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
 
     #[test]
     fn memory_falls_back_to_working_set_without_rss() {
-        let text = concat!(
-            "container_memory_working_set_bytes{id=\"/docker/a\",name=\"acme-db-1\"} 536870912\n",
-        );
+        let text =
+            "container_memory_working_set_bytes{id=\"/docker/a\",name=\"acme-db-1\"} 536870912\n";
         assert_eq!(
             parse_cadvisor(text)
                 .first()
