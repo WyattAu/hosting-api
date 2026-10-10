@@ -80,6 +80,10 @@ impl RawCredentials {
 /// Aggregated tenant state as reported by `compose.sh ps`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TenantStatus {
+    /// True when the tenant is administratively suspended (a `.suspended`
+    /// marker file sits in the tenant directory): compose is down and the
+    /// edge route is gone, but data and backups are untouched.
+    pub suspended: bool,
     /// Number of services defined in the tenant's compose project.
     pub services: usize,
     /// Services currently `Up`.
@@ -211,7 +215,16 @@ impl TenantRoot {
         };
 
         let text = String::from_utf8_lossy(&output.stdout);
-        Ok(summarise_compose_ps(&text))
+        let suspended = self.suspended(tenant);
+        Ok(summarise_compose_ps(&text, suspended))
+    }
+
+    /// Administrative suspension marker (business lifecycle, iter 10).
+    #[must_use]
+    pub fn suspended(&self, tenant: &str) -> bool {
+        self.tenant_dir(tenant)
+            .map(|dir| dir.join(".suspended").exists())
+            .unwrap_or(false)
     }
 }
 
@@ -230,7 +243,7 @@ fn is_valid_slug(slug: &str) -> bool {
 
 /// Pure summariser over `docker compose ps` table output — unit tested
 /// without Docker.
-fn summarise_compose_ps(text: &str) -> TenantStatus {
+fn summarise_compose_ps(text: &str, suspended: bool) -> TenantStatus {
     // Table header row is dropped; data rows follow.
     let rows = text
         .lines()
@@ -251,6 +264,7 @@ fn summarise_compose_ps(text: &str) -> TenantStatus {
         }
     }
     TenantStatus {
+        suspended,
         services,
         up,
         degraded,
@@ -267,7 +281,7 @@ mod tests {
 
     #[test]
     fn summarises_empty_output() {
-        let s = summarise_compose_ps("");
+        let s = summarise_compose_ps("", false);
         assert_eq!(s.services, 0);
         assert!(!s.healthy);
     }
@@ -278,7 +292,7 @@ mod tests {
             "NAME              IMAGE   COMMAND  SERVICE  CREATED  STATUS   PORTS\n\
              t-docs-postgres   pg      \"x\"      postgres 1m ago   Up 1m    \n\
              t-docs-webserver  pp      \"x\"      paperless 1m ago  Up 30s   \n",
-        );
+            false);
         assert_eq!(s.services, 2);
         assert_eq!(s.up, 2);
         assert_eq!(s.degraded, 0);
@@ -291,11 +305,23 @@ mod tests {
             "NAME    IMAGE  COMMAND  SERVICE  CREATED  STATUS             PORTS\n\
              t-redis r      \"x\"      redis    1m ago   Up 1m (unhealthy)  \n\
              t-app   a      \"x\"      app      1m ago   Restarting (1)     \n",
-        );
+            false);
         assert_eq!(s.services, 2);
         assert_eq!(s.up, 0);
         assert_eq!(s.degraded, 2);
         assert!(!s.healthy);
+    }
+
+    #[test]
+    fn suspended_marker_is_detected() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(dir.path().join("acme")).expect("tenant dir");
+        std::fs::write(dir.path().join("acme/compose.sh"), b"#!/bin/sh\n").expect("compose shim");
+        let root = TenantRoot::new(dir.path()).expect("root");
+
+        assert!(!root.suspended("acme"), "fresh tenant is not suspended");
+        std::fs::write(dir.path().join("acme/.suspended"), b"\n").expect("marker");
+        assert!(root.suspended("acme"), "marker file means suspended");
     }
 
     #[test]
