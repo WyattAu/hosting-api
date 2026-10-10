@@ -39,8 +39,11 @@ TENANT_ROOT=/srv/tenants HOSTING_LISTEN=127.0.0.1:8484 hosting-api
 ### Metering
 
 Per-tenant usage is scraped from cAdvisor (`container_cpu_usage_seconds_total`
-for CPU, `container_memory_working_set_bytes` integrated over the scrape
-interval for memory) and attributed by Docker Compose's
+for CPU; memory integrated over the scrape interval from
+`container_memory_rss`, falling back to `container_memory_working_set_bytes`
+when RSS is unavailable — RSS is billing-grade because it excludes page
+cache the kernel holds on the tenant's behalf) and attributed by Docker
+Compose's
 `<project>-<service>-<index>` naming, where the project equals the tenant slug.
 Containers whose project does not match a known tenant are ignored, and
 ambiguous prefixes are never guessed.

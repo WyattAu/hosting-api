@@ -291,7 +291,14 @@ pub fn parse_cadvisor(text: &str) -> Vec<ContainerSample> {
         return Vec::new();
     };
     let mut cpu: HashMap<String, Decimal> = HashMap::new();
-    let mut memory: HashMap<String, Decimal> = HashMap::new();
+    // Billing-grade memory is RSS (resident anonymous+kernel pages), not
+    // working_set: working_set includes ACTIVE FILE CACHE, so a tenant
+    // doing big sequential reads would be billed for cache the kernel
+    // holds on its behalf (research loop iter 3, cAdvisor metric docs).
+    // working_set remains the fallback when a deployment does not expose
+    // container_memory_rss.
+    let mut rss: HashMap<String, Decimal> = HashMap::new();
+    let mut working_set: HashMap<String, Decimal> = HashMap::new();
     for (metric, s) in series {
         let Some(id) = s.labels.get("id") else {
             continue;
@@ -315,23 +322,39 @@ pub fn parse_cadvisor(text: &str) -> Vec<ContainerSample> {
                     *slot += s.value;
                 }
             }
+            "container_memory_rss" => {
+                let slot = rss.entry(name.clone()).or_insert(Decimal::ZERO);
+                *slot = s.value;
+            }
             "container_memory_working_set_bytes" => {
-                // Working set is a gauge; keep the newest sample seen.
-                let slot = memory.entry(name.clone()).or_insert(Decimal::ZERO);
+                // Both are gauges; keep the newest sample seen.
+                let slot = working_set.entry(name.clone()).or_insert(Decimal::ZERO);
                 *slot = s.value;
             }
             _ => {}
         }
     }
-    let mut names: Vec<String> = cpu.keys().chain(memory.keys()).cloned().collect();
+    let mut names: Vec<String> = cpu
+        .keys()
+        .chain(rss.keys())
+        .chain(working_set.keys())
+        .cloned()
+        .collect();
     names.sort();
     names.dedup();
     names
         .into_iter()
-        .map(|name| ContainerSample {
-            cpu_core_seconds: cpu.get(&name).copied().unwrap_or(Decimal::ZERO),
-            memory_bytes: memory.get(&name).copied().unwrap_or(Decimal::ZERO),
-            name,
+        .map(|name| {
+            let memory_bytes = rss
+                .get(&name)
+                .copied()
+                .or_else(|| working_set.get(&name).copied())
+                .unwrap_or(Decimal::ZERO);
+            ContainerSample {
+                cpu_core_seconds: cpu.get(&name).copied().unwrap_or(Decimal::ZERO),
+                memory_bytes,
+                name,
+            }
         })
         .collect()
 }
@@ -700,6 +723,38 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
                 cpu_core_seconds: dec!(120.5),
                 memory_bytes: dec!(536870912),
             }]
+        );
+    }
+
+    #[test]
+    fn memory_prefers_rss_over_working_set() {
+        let text = concat!(
+            "container_memory_rss{id=\"/docker/a\",name=\"acme-db-1\"} 104857600\n",
+            "container_memory_working_set_bytes{id=\"/docker/a\",name=\"acme-db-1\"} 536870912\n",
+        );
+        // Working set is 512 MiB (includes active file cache); billing must
+        // use RSS (100 MiB) so cache the kernel holds on the tenant's behalf
+        // is not billed.
+        assert_eq!(
+            parse_cadvisor(text),
+            vec![ContainerSample {
+                name: "acme-db-1".to_string(),
+                cpu_core_seconds: Decimal::ZERO,
+                memory_bytes: dec!(104857600),
+            }]
+        );
+    }
+
+    #[test]
+    fn memory_falls_back_to_working_set_without_rss() {
+        let text = concat!(
+            "container_memory_working_set_bytes{id=\"/docker/a\",name=\"acme-db-1\"} 536870912\n",
+        );
+        assert_eq!(
+            parse_cadvisor(text)
+                .first()
+                .map(|s| s.memory_bytes),
+            Some(dec!(536870912))
         );
     }
 
