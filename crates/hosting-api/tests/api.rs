@@ -150,7 +150,8 @@ async fn healthz_is_ok() {
     let (_guard, root) = fixture_root(true);
     let url = serve(root, PathBuf::from("/bin/true")).await;
     let body = reqwest_get(&format!("{url}/healthz")).await;
-    assert_eq!(body, "ok");
+    // Estate healthkit contract: JSON liveness with a status enum.
+    assert_eq!(body, "{\"status\":\"healthy\"}");
 }
 
 #[tokio::test]
@@ -456,4 +457,32 @@ async fn metering_scrapes_attributes_and_prices_a_tenant() {
     );
 
     std::env::remove_var("HOSTING_CADVISOR_URL");
+}
+
+#[tokio::test]
+async fn api_rate_limit_engages_gcra() {
+    // throttle-kit GCRA: quota 10/s per identity. Hammer /healthz? No -
+    // /healthz is open and unthrottled by design; hammer an /api route.
+    let (root_dir, root) = fixture_root(true);
+    let script = fake_backup_script(root_dir.path(), 0);
+    let base = serve(root, script).await;
+    let client = reqwest::Client::new();
+
+    // The tests run fast enough that >10 requests land inside the burst
+    // window; at least one must draw a 429 with the throttle-kit body.
+    let mut codes = Vec::new();
+    for _ in 0..14 {
+        let res = client
+            .get(format!("{base}/api/tenants"))
+            .header("X-Forwarded-For", "203.0.113.7")
+            .bearer_auth("test-token")
+            .send()
+            .await
+            .expect("request");
+        codes.push(res.status().as_u16());
+    }
+    assert!(
+        codes.contains(&429),
+        "GCRA must engage inside the burst window: {codes:?}"
+    );
 }

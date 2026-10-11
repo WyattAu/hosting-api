@@ -32,8 +32,38 @@ const DEFAULT_BACKUP_SCRIPT: &str = "/opt/sis-hosting/bin/tenant-backup.sh";
 /// Default durable job-history directory.
 const DEFAULT_JOBS_DIR: &str = "/srv/backups/jobs";
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+/// Layered configuration via the estate's `envstack`: host environment
+/// first, defaults filled from the constants below.
+fn load_config() -> Config {
+    let stack = envstack::ConfigStack::new().with_env();
+    let get = |key: &str| -> Option<String> {
+        stack
+            .get(key)
+            .and_then(|v| v.as_str().map(ToOwned::to_owned))
+    };
+    let require = |key: &str| -> Option<String> {
+        get(key).filter(|v| !v.is_empty())
+    };
+    Config {
+        tenant_root: get("TENANT_ROOT").unwrap_or_else(|| DEFAULT_TENANT_ROOT.to_string()),
+        listen: get("HOSTING_LISTEN").unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
+        backup_script: get("HOSTING_BACKUP_SCRIPT")
+            .unwrap_or_else(|| DEFAULT_BACKUP_SCRIPT.to_string()),
+        jobs_dir: get("HOSTING_JOBS_DIR").unwrap_or_else(|| DEFAULT_JOBS_DIR.to_string()),
+        api_token: require("HOSTING_API_TOKEN"),
+        trust_proxy_headers: get("TRUST_PROXY_HEADERS")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1"),
+    }
+}
+
+/// Process configuration, resolved once at startup.
+struct Config {
+    tenant_root: String,
+    listen: String,
+    backup_script: String,
+    jobs_dir: String,
+    api_token: Option<String>,
+    trust_proxy_headers: bool,
 }
 
 #[tokio::main]
@@ -49,16 +79,13 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let tenant_root = PathBuf::from(env_or("TENANT_ROOT", DEFAULT_TENANT_ROOT));
-    let listen = env_or("HOSTING_LISTEN", DEFAULT_LISTEN);
-    let backup_script = PathBuf::from(env_or("HOSTING_BACKUP_SCRIPT", DEFAULT_BACKUP_SCRIPT));
-    let jobs_dir = PathBuf::from(env_or("HOSTING_JOBS_DIR", DEFAULT_JOBS_DIR));
-    let api_token = std::env::var("HOSTING_API_TOKEN")
-        .ok()
-        .filter(|t| !t.is_empty());
-    let trust_proxy_headers = std::env::var("TRUST_PROXY_HEADERS")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false);
+    let cfg = load_config();
+    let tenant_root = PathBuf::from(&cfg.tenant_root);
+    let listen = cfg.listen.clone();
+    let backup_script = PathBuf::from(&cfg.backup_script);
+    let jobs_dir = PathBuf::from(&cfg.jobs_dir);
+    let api_token = cfg.api_token.clone();
+    let trust_proxy_headers = cfg.trust_proxy_headers;
 
     if api_token.is_none() {
         tracing::warn!("HOSTING_API_TOKEN not set — /api/* is CLOSED (fail closed)");

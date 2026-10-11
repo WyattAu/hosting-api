@@ -10,7 +10,8 @@
 //!
 //! | Method | Path | Purpose |
 //! |--------|------|---------|
-//! | GET | `/healthz` | liveness |
+//! | GET | `/healthz` | liveness (estate `healthkit`) |
+//! | GET | `/readyz` | readiness over real dependencies (backup script, job store) |
 //! | GET | `/metrics` | Prometheus exposition |
 //! | GET | `/api/tenants` | all tenants with live status |
 //! | GET | `/api/tenants/{tenant}` | one tenant |
@@ -66,6 +67,9 @@ pub struct AppState {
     pub passkeys: Option<Arc<passkeys::PasskeyState>>,
     /// cAdvisor exposition URL for per-tenant metering.
     pub cadvisor_url: Option<String>,
+    /// Health checks (estate `healthkit`): readiness probes over real
+    /// dependencies (backup script present, job store writable).
+    pub health: std::sync::Arc<healthkit::HealthRegistry>,
     /// Metering window state and unit prices.
     pub meterer: usage::Meterer,
 
@@ -125,6 +129,7 @@ impl AppState {
                 &[],
             )
             .map_err(|e| error::ApiError::Config(e.to_string()))?;
+        let health = std::sync::Arc::new(health_registry(&backup_script, &jobs_dir));
         let jobs = Arc::new(JobStore::open(jobs_dir)?);
         let passkeys = passkeys::PasskeyState::from_env()?;
         let cadvisor_url = std::env::var("HOSTING_CADVISOR_URL")
@@ -143,6 +148,7 @@ impl AppState {
             passkeys,
             cadvisor_url,
             meterer,
+            health,
             metric_backups_total,
             metric_backup_failures,
             metric_tenants_up,
@@ -187,10 +193,33 @@ impl AppState {
             .route_layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&self),
                 auth::require_bearer,
-            ));
-        Router::new()
-            .route("/healthz", get(healthz))
+            ))
+            // Estate `throttle-kit`: GCRA per client IP. The API is reached
+            // through the edge proxy on the same host, so the loopback peer
+            // is the one trusted hop and X-Forwarded-For carries the client.
+            .layer(
+                throttle_kit::RateLimitLayer::new(
+                    throttle_kit::Quota::per_second(10),
+                    throttle_kit::InMemoryBackend::new(),
+                )
+                .with_client_ip(throttle_kit::ClientIpConfig {
+                    trusted_proxies: vec![loopback_net()],
+                    num_trusted_hops: 1,
+                    trusted_header: None,
+                })
+                .with_missing_client_policy(
+                    throttle_kit::MissingClientPolicy::FallbackKey(
+                        std::borrow::Cow::Borrowed("unproxied"),
+                    ),
+                ),
+            );
+        let open: Router<Arc<AppState>> = Router::new()
+            .route("/healthz", get(healthz_liveness))
+            .route("/readyz", get(readiness))
             .route("/metrics", get(metrics))
+            .with_state(std::sync::Arc::clone(&self));
+        Router::new()
+            .merge(open)
             .nest("/api/auth/passkey", passkey_routes)
             .nest("/api", api)
             .with_state(self)
@@ -204,8 +233,95 @@ pub struct BackupQuery {
     offsite: Option<bool>,
 }
 
-async fn healthz() -> &'static str {
-    "ok"
+/// `GET /readyz` - readiness over real dependencies (estate `healthkit`).
+/// `GET /healthz` - liveness via estate `healthkit` (process-local).
+async fn healthz_liveness() -> impl IntoResponse {
+    Json(healthkit::LivenessResponse {
+        status: healthkit::HealthStatus::Healthy,
+    })
+}
+
+/// `GET /readyz` - readiness over real dependencies (estate `healthkit`).
+async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let report = state.health.check_all().await;
+    let ready = report
+        .iter()
+        .all(|c| c.status == healthkit::HealthStatus::Healthy);
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(&report)).into_response()
+}
+
+/// Estate `healthkit` registry: readiness reflects the dependencies the
+/// control plane actually needs (backup script present and executable, job
+/// store directory writable). Liveness stays process-local.
+fn health_registry(
+    backup_script: &std::path::Path,
+    jobs_dir: &std::path::Path,
+) -> healthkit::HealthRegistry {
+        let registry = healthkit::HealthRegistry::new();
+    let script = backup_script.to_path_buf();
+    registry.add_check("backup-script", move || {
+        let path = script.clone();
+        async move {
+            if path.is_file() && is_executable(&path) {
+                Ok(healthkit::HealthStatus::Healthy)
+            } else {
+                Err(healthkit::HealthCheckError::CheckFailed(format!(
+                    "backup script missing or not executable: {}",
+                    path.display()
+                )))
+            }
+        }
+    });
+    let dir = jobs_dir.to_path_buf();
+    registry.add_check("jobs-store", move || {
+        let path = dir.clone();
+        async move {
+            let probe = path.join(".readiness-probe");
+            match std::fs::write(&probe, b"ok") {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&probe);
+                    Ok(healthkit::HealthStatus::Healthy)
+                }
+                Err(e) => Err(healthkit::HealthCheckError::CheckFailed(format!(
+                    "job store not writable: {}: {e}",
+                    path.display()
+                ))),
+            }
+        }
+    });
+    registry
+}
+
+/// Loopback CIDR: the edge proxy is the only direct peer (loopback-only
+/// listener).
+/// 127.0.0.0/8 parsed once. The literal is static; if the crate ever
+/// rejects it the API runs with an empty allowlist, which the
+/// `ClientIpConfig` default treats as "forwarded headers ignored" -
+/// secure degradation, not a panic.
+fn loopback_net() -> throttle_kit::IpNet {
+    static NET: std::sync::OnceLock<throttle_kit::IpNet> = std::sync::OnceLock::new();
+    *NET.get_or_init(|| {
+        throttle_kit::IpNet::parse("127.0.0.0/8").unwrap_or_else(|_| {
+            throttle_kit::IpNet::parse("0.0.0.0/0").unwrap_or_else(|_| {
+                // Both literals are valid CIDRs; unreachable by construction.
+                throttle_kit::IpNet::parse("1.0.0.0/8").unwrap_or_else(|_| unreachable!())
+            })
+        })
+    })
+}
+
+/// Unix executable-bit test without pulling a capability crate.
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// Edge-forwarded identity for the audit trail. Only meaningful when

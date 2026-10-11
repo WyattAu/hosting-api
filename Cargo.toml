@@ -34,6 +34,9 @@ worker-kit = { version = "0.3", features = ["cron"] }
 shutdown-kit = "0.3"
 webauthn-kit = { version = "0.4", features = ["serde"] }
 billing-kit = "0.2"  # metering money math (CurrencyAmount/Price)
+healthkit = "1.2"    # liveness/readiness routes (estate dogfood)
+throttle-kit = { version = "1.1", features = ["tower"] }  # estate GCRA (dir: ratelimit)    # GCRA edge protection (estate dogfood)
+envstack = "0.2"     # layered config (estate dogfood)
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "process", "time"] }
 axum = "0.8"
