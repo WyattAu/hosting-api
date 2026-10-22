@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use billing_kit::{Currency, CurrencyAmount, Decimal, Price};
-use rust_decimal::prelude::ToPrimitive;
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 /// Bytes per gibibyte.
@@ -88,8 +88,8 @@ impl TenantUsage {
     pub fn charge(&self, cfg: &MeteringConfig) -> Result<CurrencyAmount, UsageError> {
         let cpu_hours = self.cpu_core_seconds / Decimal::from(SECONDS_PER_HOUR);
         let memory_hours = self.memory_gibibyte_seconds / Decimal::from(SECONDS_PER_HOUR);
-        let amount = cpu_hours * cfg.cpu_price_per_core_hour
-            + memory_hours * cfg.memory_price_per_gib_hour;
+        let amount =
+            cpu_hours * cfg.cpu_price_per_core_hour + memory_hours * cfg.memory_price_per_gib_hour;
         Ok(CurrencyAmount::new(amount, cfg.currency))
     }
 }
@@ -143,7 +143,8 @@ impl MeteringConfig {
             &var_or("HOSTING_METERING_DISCOUNT_PERCENT", "0"),
             "HOSTING_METERING_DISCOUNT_PERCENT",
         )?;
-        if cpu_price_per_core_hour.is_sign_negative() || memory_price_per_gib_hour.is_sign_negative()
+        if cpu_price_per_core_hour.is_sign_negative()
+            || memory_price_per_gib_hour.is_sign_negative()
         {
             return Err(UsageError::Config(
                 "unit prices must not be negative".to_string(),
@@ -311,10 +312,7 @@ pub fn parse_cadvisor(text: &str) -> Vec<ContainerSample> {
         };
         match metric.as_str() {
             "container_cpu_usage_seconds_total" => {
-                let per_cpu = s
-                    .labels
-                    .get("cpu")
-                    .is_some_and(|c| c != "total");
+                let per_cpu = s.labels.get("cpu").is_some_and(|c| c != "total");
                 let slot = cpu.entry(name.clone()).or_insert(Decimal::ZERO);
                 if !per_cpu {
                     *slot = s.value;
@@ -556,7 +554,10 @@ impl Meterer {
     /// Returns [`UsageError::Scrape`] when cAdvisor cannot be reached or
     /// its exposition cannot be parsed. A disabled meterer returns the
     /// accumulated totals unchanged.
-    pub async fn refresh(&self, tenants: &[String]) -> Result<HashMap<String, TenantUsage>, UsageError> {
+    pub async fn refresh(
+        &self,
+        tenants: &[String],
+    ) -> Result<HashMap<String, TenantUsage>, UsageError> {
         let Some(url) = self.cadvisor_url.as_deref() else {
             return Ok(self.window().await);
         };
@@ -661,7 +662,8 @@ impl TenantGauges {
 
     /// Push a usage sample and its price into the gauges.
     pub fn observe(&self, usage: &TenantUsage, cfg: &MeteringConfig) {
-        self.cpu_core_seconds.set(usage.cpu_core_seconds.to_f64().unwrap_or(0.0));
+        self.cpu_core_seconds
+            .set(usage.cpu_core_seconds.to_f64().unwrap_or(0.0));
         self.memory_gibibyte_seconds
             .set(usage.memory_gibibyte_seconds.to_f64().unwrap_or(0.0));
         if let Ok(amount) = usage.charge(cfg) {
@@ -750,9 +752,7 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
         let text =
             "container_memory_working_set_bytes{id=\"/docker/a\",name=\"acme-db-1\"} 536870912\n";
         assert_eq!(
-            parse_cadvisor(text)
-                .first()
-                .map(|s| s.memory_bytes),
+            parse_cadvisor(text).first().map(|s| s.memory_bytes),
             Some(dec!(536870912))
         );
     }
@@ -765,7 +765,10 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
         for (metric, series) in parsed {
             assert_eq!(metric, "metric_a");
             assert_eq!(series.labels.get("label").map(String::as_str), Some("a,b"));
-            assert_eq!(series.labels.get("name").map(String::as_str), Some("we\"ird"));
+            assert_eq!(
+                series.labels.get("name").map(String::as_str),
+                Some("we\"ird")
+            );
             assert_eq!(series.value, dec!(1.5));
         }
     }
@@ -802,7 +805,11 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
     #[test]
     fn computes_cpu_and_memory_deltas_per_tenant() {
         let mut c = UsageCollector::new();
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster()).is_ok(), "baseline observe should succeed");
+        assert!(
+            c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster())
+                .is_ok(),
+            "baseline observe should succeed"
+        );
         let second = [ContainerSample {
             name: "acme-paperless-1".to_string(),
             cpu_core_seconds: dec!(150.5),
@@ -825,7 +832,11 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
     #[test]
     fn window_accumulates_across_intervals() {
         let mut c = UsageCollector::new();
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster()).is_ok(), "baseline observe should succeed");
+        assert!(
+            c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster())
+                .is_ok(),
+            "baseline observe should succeed"
+        );
         let mut cpu = dec!(120.5);
         let mut last = Decimal::ZERO;
         for minute in [10, 20, 30] {
@@ -835,20 +846,32 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
                 cpu_core_seconds: cpu,
                 memory_bytes: last,
             }];
-            let totals = c.observe(&sample, at(minute), &roster()).unwrap_or_default();
+            let totals = c
+                .observe(&sample, at(minute), &roster())
+                .unwrap_or_default();
             last = totals
                 .get("acme")
                 .map_or(Decimal::ZERO, |u| u.cpu_core_seconds);
         }
-        assert_eq!(last, dec!(30.0), "10 core-seconds per interval, 3 intervals");
+        assert_eq!(
+            last,
+            dec!(30.0),
+            "10 core-seconds per interval, 3 intervals"
+        );
         assert_eq!(c.totals().get("acme").map(|u| u.window_end), Some(at(30)));
     }
 
     #[test]
     fn reset_window_starts_a_fresh_period() {
         let mut c = UsageCollector::new();
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster()).is_ok(), "baseline observe should succeed");
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(10), &roster()).is_ok());
+        assert!(
+            c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster())
+                .is_ok(),
+            "baseline observe should succeed"
+        );
+        assert!(c
+            .observe(&parse_cadvisor(CADVISOR_SAMPLE), at(10), &roster())
+            .is_ok());
         c.reset_window();
         assert!(c.totals().is_empty());
     }
@@ -856,13 +879,19 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
     #[test]
     fn counter_reset_does_not_produce_negative_usage() {
         let mut c = UsageCollector::new();
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster()).is_ok(), "baseline observe should succeed");
+        assert!(
+            c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster())
+                .is_ok(),
+            "baseline observe should succeed"
+        );
         let after_recreate = [ContainerSample {
             name: "acme-paperless-1".to_string(),
             cpu_core_seconds: dec!(1),
             memory_bytes: dec!(1024),
         }];
-        let totals = c.observe(&after_recreate, at(5), &roster()).unwrap_or_default();
+        let totals = c
+            .observe(&after_recreate, at(5), &roster())
+            .unwrap_or_default();
         assert!(totals.contains_key("acme"));
         for acme in totals.values() {
             assert_eq!(acme.cpu_core_seconds, Decimal::ZERO);
@@ -873,14 +902,20 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
     #[test]
     fn timestamps_going_backwards_are_rejected() {
         let mut c = UsageCollector::new();
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(5), &roster()).is_ok());
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(4), &roster()).is_err());
+        assert!(c
+            .observe(&parse_cadvisor(CADVISOR_SAMPLE), at(5), &roster())
+            .is_ok());
+        assert!(c
+            .observe(&parse_cadvisor(CADVISOR_SAMPLE), at(4), &roster())
+            .is_err());
     }
 
     #[test]
     fn sub_second_intervals_are_accepted() {
         let mut c = UsageCollector::new();
-        assert!(c.observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster()).is_ok());
+        assert!(c
+            .observe(&parse_cadvisor(CADVISOR_SAMPLE), at(0), &roster())
+            .is_ok());
         let later = DateTime::from_timestamp(1_700_000_000 + 250, 0).unwrap_or_default();
         let totals = c
             .observe(&parse_cadvisor(CADVISOR_SAMPLE), later, &roster())
@@ -903,10 +938,13 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
             tenant: "acme".to_string(),
             window_start: at(0),
             window_end: at(10),
-            cpu_core_seconds: dec!(720),        // 0.2 core-hours
+            cpu_core_seconds: dec!(720),         // 0.2 core-hours
             memory_gibibyte_seconds: dec!(3600), // 1 gib-hour
         };
-        assert_eq!(usage.charge(&cfg).map_or(Decimal::ZERO, |c| c.amount), dec!(0.003));
+        assert_eq!(
+            usage.charge(&cfg).map_or(Decimal::ZERO, |c| c.amount),
+            dec!(0.003)
+        );
     }
 
     #[test]
@@ -932,7 +970,11 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
             dec!(20.01),
             "20 subscription + 1 core-hour at 0.01"
         );
-        assert_eq!(price.gross().amount, dec!(24.012), "20% VAT on the metered total");
+        assert_eq!(
+            price.gross().amount,
+            dec!(24.012),
+            "20% VAT on the metered total"
+        );
     }
 
     #[test]
@@ -959,12 +1001,15 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
     #[test]
     fn env_config_rejects_bad_values() {
         assert!(parse_decimal("nope", "X").is_err());
-        assert!(MeteringConfig {
-            cpu_price_per_core_hour: dec!(-1),
-            ..cfg_zero_discount()
-        }
-        .monthly_price(dec!(1), dec!(0), None)
-        .is_ok(), "negative prices are rejected by from_env, not by pricing");
+        assert!(
+            MeteringConfig {
+                cpu_price_per_core_hour: dec!(-1),
+                ..cfg_zero_discount()
+            }
+            .monthly_price(dec!(1), dec!(0), None)
+            .is_ok(),
+            "negative prices are rejected by from_env, not by pricing"
+        );
     }
 
     #[test]

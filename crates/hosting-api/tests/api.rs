@@ -337,7 +337,10 @@ async fn usage_endpoints_report_disabled_when_cadvisor_is_unset() {
         .expect("GET /api/usage");
     assert!(res.status().is_success());
     let body: serde_json::Value = res.json().await.expect("json");
-    assert_eq!(body.get("metering_enabled"), Some(&serde_json::json!(false)));
+    assert_eq!(
+        body.get("metering_enabled"),
+        Some(&serde_json::json!(false))
+    );
     assert_eq!(body.get("currency"), Some(&serde_json::json!("GBP")));
     assert!(
         body.get("tenants").is_some_and(serde_json::Value::is_array),
@@ -401,7 +404,10 @@ async fn metering_scrapes_attributes_and_prices_a_tenant() {
         .json()
         .await
         .expect("json");
-    assert_eq!(first.get("metering_enabled"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        first.get("metering_enabled"),
+        Some(&serde_json::json!(true))
+    );
     assert!(
         first.get("usage").is_none_or(serde_json::Value::is_null),
         "a baseline scrape yields no usage yet: {first}"
@@ -452,7 +458,8 @@ async fn metering_scrapes_attributes_and_prices_a_tenant() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        rows.iter().all(|r| r.get("tenant").and_then(serde_json::Value::as_str) != Some("ghost")),
+        rows.iter()
+            .all(|r| r.get("tenant").and_then(serde_json::Value::as_str) != Some("ghost")),
         "unknown container projects must not become tenants: {summary}"
     );
 

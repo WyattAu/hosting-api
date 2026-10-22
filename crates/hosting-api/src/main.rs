@@ -41,9 +41,7 @@ fn load_config() -> Config {
             .get(key)
             .and_then(|v| v.as_str().map(ToOwned::to_owned))
     };
-    let require = |key: &str| -> Option<String> {
-        get(key).filter(|v| !v.is_empty())
-    };
+    let require = |key: &str| -> Option<String> { get(key).filter(|v| !v.is_empty()) };
     // NOTE (SIS round 6, iter 51): envstack lowercases env-var names when
     // it builds its layer tree, and `ConfigStack::get` resolves paths
     // case-sensitively — so config keys are queried LOWERCASE here. The

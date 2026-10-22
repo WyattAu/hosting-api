@@ -292,7 +292,8 @@ mod tests {
             "NAME              IMAGE   COMMAND  SERVICE  CREATED  STATUS   PORTS\n\
              t-docs-postgres   pg      \"x\"      postgres 1m ago   Up 1m    \n\
              t-docs-webserver  pp      \"x\"      paperless 1m ago  Up 30s   \n",
-            false);
+            false,
+        );
         assert_eq!(s.services, 2);
         assert_eq!(s.up, 2);
         assert_eq!(s.degraded, 0);
@@ -305,7 +306,8 @@ mod tests {
             "NAME    IMAGE  COMMAND  SERVICE  CREATED  STATUS             PORTS\n\
              t-redis r      \"x\"      redis    1m ago   Up 1m (unhealthy)  \n\
              t-app   a      \"x\"      app      1m ago   Restarting (1)     \n",
-            false);
+            false,
+        );
         assert_eq!(s.services, 2);
         assert_eq!(s.up, 0);
         assert_eq!(s.degraded, 2);

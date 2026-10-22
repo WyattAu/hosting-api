@@ -231,9 +231,9 @@ impl AppState {
                     trusted_header: None,
                 })
                 .with_missing_client_policy(
-                    throttle_kit::MissingClientPolicy::FallbackKey(
-                        std::borrow::Cow::Borrowed("unproxied"),
-                    ),
+                    throttle_kit::MissingClientPolicy::FallbackKey(std::borrow::Cow::Borrowed(
+                        "unproxied",
+                    )),
                 ),
             );
         let open: Router<Arc<AppState>> = Router::new()
@@ -285,7 +285,7 @@ fn health_registry(
     backup_script: &std::path::Path,
     jobs_dir: &std::path::Path,
 ) -> healthkit::HealthRegistry {
-        let registry = healthkit::HealthRegistry::new();
+    let registry = healthkit::HealthRegistry::new();
     let script = backup_script.to_path_buf();
     registry.add_check("backup-script", move || {
         let path = script.clone();

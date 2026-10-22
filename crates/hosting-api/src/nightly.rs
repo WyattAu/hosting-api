@@ -91,7 +91,11 @@ fn metering_close_job(state: Arc<AppState>) -> Job {
             let totals = state.meterer.window().await;
             let mut posted = 0usize;
             for (tenant, usage) in &totals {
-                match state.ledger.record_window(usage, state.meterer.config()).await {
+                match state
+                    .ledger
+                    .record_window(usage, state.meterer.config())
+                    .await
+                {
                     Ok(Some(p)) => {
                         posted += 1;
                         tracing::info!(
@@ -106,9 +110,7 @@ fn metering_close_job(state: Arc<AppState>) -> Job {
                         // Do NOT reset the window on a failed post: the
                         // next close retries the same idempotency key.
                         tracing::error!(tenant = %tenant, error = %e, "metering close failed");
-                        return Err(JobError::msg(format!(
-                            "metering close: {tenant}: {e}"
-                        )));
+                        return Err(JobError::msg(format!("metering close: {tenant}: {e}")));
                     }
                 }
             }

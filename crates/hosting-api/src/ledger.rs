@@ -172,7 +172,12 @@ impl UsageLedger {
         );
         // Durable claim check: the journal is the source of truth, and a
         // replayed posting is as real as one posted in this process.
-        for existing in self.ledger.journal().postings_for(&tenant, usize::MAX).await? {
+        for existing in self
+            .ledger
+            .journal()
+            .postings_for(&tenant, usize::MAX)
+            .await?
+        {
             if existing.memo().contains(&token) {
                 return Ok(None);
             }
@@ -279,7 +284,10 @@ mod tests {
             .await
             .expect("duplicate resolves");
         assert!(second.is_none(), "duplicate window is a no-op");
-        let (balance, postings) = ledger.tenant_statement("acme", 10, cfg().currency).await.expect("statement");
+        let (balance, postings) = ledger
+            .tenant_statement("acme", 10, cfg().currency)
+            .await
+            .expect("statement");
         assert_eq!(postings.len(), 1, "exactly one posting");
         assert_eq!(
             balance.balance.amount,
@@ -331,6 +339,9 @@ mod tests {
             .record_window(&u, &cfg())
             .await
             .expect("re-post after restart");
-        assert!(again.is_none(), "same window stays idempotent across restarts");
+        assert!(
+            again.is_none(),
+            "same window stays idempotent across restarts"
+        );
     }
 }
