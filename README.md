@@ -86,3 +86,19 @@ cargo test
 ## License
 
 Apache-2.0
+
+## 0.6.0 (unreleased)
+
+- **Durable metering journal** (`ledger-kit` + `outbox-kit`): closed
+  metering windows post to a double-entry ledger mirrored into a
+  SQLite outbox (`HOSTING_LEDGER_DB`); crash-safe replay at boot; the
+  journal is the billing artifact.
+- **`GET /api/tenants/{t}/ledger`** — derived balance + postings.
+- **Nightly metering window close** (worker-kit cron 03:15 UTC, after
+  the sweep); a failed post does not reset the window (idempotent
+  retry).
+- **FIX**: `load_config` queried envstack with uppercase keys, which
+  silently resolved to `None` (envstack lowercases its layer tree) —
+  the API booted with `HOSTING_API_TOKEN`/`TENANT_ROOT` ignored.
+  Consumer-side fix; envstack also gained a case-insensitive lookup
+  fallback (0.2.2).
