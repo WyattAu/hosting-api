@@ -37,8 +37,14 @@ billing-kit = "0.2"  # metering money math (CurrencyAmount/Price)
 ledger-kit = "0.1"   # double-entry journal for closed metering windows
 outbox-kit = { version = "0.2", features = ["sqlite"] }  # durable outbox behind the ledger
 healthkit = "1.2"    # liveness/readiness routes (estate dogfood)
+oauth-toolkit = "0.4" # OIDC validation for /api JWTs (estate issuer: authbox)
+url = "2"            # issuer URL validation
 throttle-kit = { version = "1.1", features = ["tower"] }  # estate GCRA (dir: ratelimit)    # GCRA edge protection (estate dogfood)
 envstack = "0.2"     # layered config (estate dogfood)
+jsonwebtoken = "9"   # dev: sign fixture tokens for the OIDC test
+p256 = { version = "0.13", features = ["pem", "ecdsa"] }  # dev: ES256 fixture key
+rand_core = { version = "0.6", features = ["getrandom"] }  # dev: fixture keygen
+base64 = "0.22"  # dev: fixture JWKS coords
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "process", "time"] }
 axum = "0.8"
@@ -51,3 +57,8 @@ tracing = "0.1"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# TEMPORARY (SIS round 7 iter 64): pulls the algorithm-aware JWKS
+# validator until oauth-toolkit 0.4.1 publishes. REMOVE on publish.
+[patch.crates-io]
+oauth-toolkit = { path = "../oauth-toolkit" }

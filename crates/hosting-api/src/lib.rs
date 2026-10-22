@@ -72,6 +72,10 @@ pub struct AppState {
     /// Health checks (estate `healthkit`): readiness probes over real
     /// dependencies (backup script present, job store writable).
     pub health: std::sync::Arc<healthkit::HealthRegistry>,
+    /// OIDC validator over the estate issuer (authbox). `None` until
+    /// `HOSTING_OIDC_ISSUER` is set — the legacy static token then
+    /// remains the only /api credential.
+    pub oidc: Option<std::sync::Arc<oauth_toolkit::oidc_validator::OidcValidator>>,
     /// Metering window state and unit prices.
     pub meterer: usage::Meterer,
     /// Durable charge journal (always on; SQLite-backed when
@@ -147,6 +151,33 @@ impl AppState {
         // broken path fails the boot — a silently absent billing journal
         // is exactly what the ledger exists to prevent. Outbox replay is
         // spawned by main after state construction (restore is async).
+        // OIDC mode (round 7 iter 64): HOSTING_OIDC_ISSUER enables
+        // authbox-issued JWTs as /api credentials (Admin realm role
+        // required). Fail the boot on a bad issuer URL — a typo'd
+        // identity configuration must not degrade to static-token-only
+        // silently.
+        let oidc = std::env::var("HOSTING_OIDC_ISSUER")
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+            .map(|issuer| {
+                let audience = std::env::var("HOSTING_OIDC_AUDIENCE")
+                    .unwrap_or_else(|_| "hosting-api".to_string());
+                let jwks_uri = std::env::var("HOSTING_OIDC_JWKS_URI")
+                    .ok()
+                    .filter(|u| !u.trim().is_empty());
+                let url = url::Url::parse(&issuer)
+                    .map_err(|e| error::ApiError::Config(format!("HOSTING_OIDC_ISSUER: {e}")))?;
+                Ok::<_, error::ApiError>(std::sync::Arc::new(
+                    oauth_toolkit::oidc_validator::OidcValidator::new(
+                        oauth_toolkit::oidc_validator::OidcValidatorConfig {
+                            issuer: url.to_string(),
+                            audience,
+                            jwks_uri,
+                        },
+                    ),
+                ))
+            })
+            .transpose()?;
         let metering_cfg = meterer.config().clone();
         let ledger_db = std::env::var("HOSTING_LEDGER_DB")
             .ok()
@@ -168,6 +199,7 @@ impl AppState {
             trust_proxy_headers,
             passkeys,
             cadvisor_url,
+            oidc,
             meterer,
             ledger,
             health,

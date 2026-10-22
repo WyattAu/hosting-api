@@ -129,6 +129,19 @@ async fn main() {
         let _ = telemetry.shutdown();
         std::process::exit(1);
     }
+    // Warm the OIDC JWKS cache at boot (round 7 iter 64): an issuer
+    // that is unreachable at startup must not wedge the boot — the
+    // validator re-fetches on demand; this just makes the first request
+    // cheap and surfaces misconfiguration early in the logs.
+    if let Some(oidc) = state.oidc.as_ref() {
+        let oidc = std::sync::Arc::clone(oidc);
+        tokio::spawn(async move {
+            if let Err(e) = oidc.refresh_jwks().await {
+                tracing::warn!(error = %e, "OIDC JWKS warm-up failed (will retry on demand)");
+            }
+        });
+    }
+
     // Replay the ledger outbox into the fast journal (round 6 iter 51):
     // at-least-once, idempotent on posting ids — a crash between post and
     // replay loses nothing.

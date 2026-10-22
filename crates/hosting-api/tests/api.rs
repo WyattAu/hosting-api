@@ -493,3 +493,185 @@ async fn api_rate_limit_engages_gcra() {
         "GCRA must engage inside the burst window: {codes:?}"
     );
 }
+
+/// OIDC fixture: a loopback identity provider serving discovery and
+/// generated ES256 key, plus a signer for tokens. (Round 7 iter 64.)
+use base64::Engine as _;
+
+struct OidcFixture {
+    base: String,
+    signer: jsonwebtoken::EncodingKey,
+    kid: &'static str,
+}
+
+impl OidcFixture {
+    async fn start(roles: &[&str]) -> Self {
+        use p256::ecdsa::SigningKey;
+        use p256::pkcs8::EncodePrivateKey;
+        use rand_core::OsRng;
+
+        let secret = SigningKey::random(&mut OsRng);
+        let signer = jsonwebtoken::EncodingKey::from_ec_pem(
+            secret
+                .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+                .expect("pkcs8")
+                .as_bytes(),
+        )
+        .expect("encoding key");
+
+        // Public point -> EC2 JWK coordinates.
+        let point = secret.verifying_key().to_encoded_point(false);
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let jwks = serde_json::json!({
+            "keys": [{
+                "kty": "EC", "crv": "P-256", "kid": "probe",
+                "x": b64(point.x().unwrap().as_slice()),
+                "y": b64(point.y().unwrap().as_slice()),
+            }]
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("idp bind");
+        let addr = listener.local_addr().expect("idp addr");
+        let issuer = format!("http://{addr}/authbox");
+        // OidcDiscovery requires the full endpoint set; serve the shapes
+        // the validator's clients use.
+        let discovery_body = serde_json::json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/auth"),
+            "token_endpoint": format!("{issuer}/token"),
+            "userinfo_endpoint": format!("{issuer}/userinfo"),
+            "jwks_uri": format!("{issuer}/jwks.json"),
+        })
+        .to_string();
+        let jwks_body = jwks.to_string();
+        let app = axum::Router::new().nest(
+            "/authbox",
+            axum::Router::new()
+                .route(
+                    "/.well-known/openid-configuration",
+                    axum::routing::get(move || {
+                        let body = discovery_body.clone();
+                        async move { body }
+                    }),
+                )
+                .route(
+                    "/jwks.json",
+                    axum::routing::get(move || {
+                        let body = jwks_body.clone();
+                        async move { body }
+                    }),
+                ),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .expect("idp serve");
+        });
+        // Fixture self-check: the discovery endpoint must serve JSON.
+        let probe = reqwest::get(format!("{issuer}/.well-known/openid-configuration"))
+            .await
+            .expect("idp reachable");
+        let status = probe.status();
+        let ctype = probe
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+        let body = probe.text().await.unwrap_or_default();
+        eprintln!("IDP self-check: {status} {ctype} {body}");
+        let _ = roles;
+        Self {
+            base: format!("http://{addr}/authbox"),
+            signer,
+            kid: "probe",
+        }
+    }
+
+    fn token(&self, sub: &str, roles: &[&str]) -> String {
+        let claims = serde_json::json!({
+            "iss": self.base,
+            "sub": sub,
+            "aud": "hosting-api",
+            "exp": chrono::Utc::now().timestamp() + 600,
+            "realm_access": { "roles": roles },
+        });
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(self.kid.to_string());
+        jsonwebtoken::encode(&header, &claims, &self.signer).expect("sign")
+    }
+}
+
+#[tokio::test]
+async fn authbox_issued_jwt_grants_api_access_by_role() {
+    // Serial: AppState::new reads process env at construction.
+    let idp = OidcFixture::start(&["Admin"]).await;
+    // SAFETY (test-only): single-threaded env mutation against the
+    // fixture's own variables; other tests do not read these keys.
+    // Ambient HTTP(S)_PROXY env would route the loopback JWKS fetch
+    // through a corporate proxy (reqwest honors it by default).
+    std::env::set_var("NO_PROXY", "*");
+    std::env::set_var("no_proxy", "*");
+    std::env::set_var("HOSTING_OIDC_ISSUER", idp.base.clone());
+    std::env::set_var("HOSTING_OIDC_AUDIENCE", "hosting-api");
+
+    let (_guard, root) = fixture_root(true);
+    let script_dir = tempfile::tempdir().expect("script tmp");
+    let script = script_dir.path().join("tenant-backup.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0").expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let registry = Arc::new(Registry::new());
+    let jobs_dir = tempfile::tempdir().expect("jobs tmp");
+    let state = Arc::new(
+        AppState::new(
+            root.clone(),
+            script.clone(),
+            registry,
+            jobs_dir.path().to_path_buf(),
+            Some("legacy-token".to_string()),
+            false,
+        )
+        .expect("state"),
+    );
+    assert!(
+        state.oidc.is_some(),
+        "OIDC validator must be constructed when HOSTING_OIDC_ISSUER is set"
+    );
+    let server = TestServer::new(state.router()).await;
+    let base = server.base_url();
+
+    // Admin-role JWT from the fixture issuer: accepted.
+    let admin = idp.token("probe-svc", &["Admin"]);
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/tenants"))
+        .header("Authorization", format!("Bearer {admin}"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(res.status(), 200, "Admin JWT must grant /api access");
+
+    // Viewer-role JWT from the same issuer: rejected (role gate).
+    let viewer = idp.token("probe-svc", &["Viewer"]);
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/tenants"))
+        .header("Authorization", format!("Bearer {viewer}"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(res.status(), 401, "non-Admin roles must not pass");
+
+    // The legacy static token still works (break-glass path intact).
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/tenants"))
+        .header("Authorization", "Bearer legacy-token")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(res.status(), 200, "legacy token must keep working");
+}

@@ -19,6 +19,8 @@ ledger-kit.workspace = true
 outbox-kit.workspace = true
 rust_decimal = "1"
 healthkit.workspace = true
+oauth-toolkit.workspace = true
+url.workspace = true
 throttle-kit.workspace = true
 envstack.workspace = true
 axum.workspace = true
@@ -32,6 +34,10 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+base64.workspace = true
+jsonwebtoken.workspace = true
+p256.workspace = true
+rand_core.workspace = true
 rust_decimal_macros = "1"
 
 [lints]

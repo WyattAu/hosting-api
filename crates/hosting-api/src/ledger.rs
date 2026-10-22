@@ -246,6 +246,8 @@ impl UsageLedger {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
     use super::*;
     use chrono::{DateTime, Utc};
     use rust_decimal_macros::dec;
