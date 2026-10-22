@@ -44,14 +44,20 @@ fn load_config() -> Config {
     let require = |key: &str| -> Option<String> {
         get(key).filter(|v| !v.is_empty())
     };
+    // NOTE (SIS round 6, iter 51): envstack lowercases env-var names when
+    // it builds its layer tree, and `ConfigStack::get` resolves paths
+    // case-sensitively — so config keys are queried LOWERCASE here. The
+    // uppercase spellings silently resolved to None (shipped 0.5.0 bug:
+    // the API booted with HOSTING_API_TOKEN ignored; caught by the real-
+    // binary verification this iteration, see SIS .docs/engineering-loop.md).
     Config {
-        tenant_root: get("TENANT_ROOT").unwrap_or_else(|| DEFAULT_TENANT_ROOT.to_string()),
-        listen: get("HOSTING_LISTEN").unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
-        backup_script: get("HOSTING_BACKUP_SCRIPT")
+        tenant_root: get("tenant_root").unwrap_or_else(|| DEFAULT_TENANT_ROOT.to_string()),
+        listen: get("hosting_listen").unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
+        backup_script: get("hosting_backup_script")
             .unwrap_or_else(|| DEFAULT_BACKUP_SCRIPT.to_string()),
-        jobs_dir: get("HOSTING_JOBS_DIR").unwrap_or_else(|| DEFAULT_JOBS_DIR.to_string()),
-        api_token: require("HOSTING_API_TOKEN"),
-        trust_proxy_headers: get("TRUST_PROXY_HEADERS")
+        jobs_dir: get("hosting_jobs_dir").unwrap_or_else(|| DEFAULT_JOBS_DIR.to_string()),
+        api_token: require("hosting_api_token"),
+        trust_proxy_headers: get("trust_proxy_headers")
             .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1"),
     }
 }
@@ -119,6 +125,24 @@ async fn main() {
         tracing::error!(error = %e, "failed to register nightly sweep");
         let _ = telemetry.shutdown();
         std::process::exit(1);
+    }
+    if let Err(e) = hosting_api::nightly::register_metering_close(&mut supervisor, &state) {
+        tracing::error!(error = %e, "failed to register metering close");
+        let _ = telemetry.shutdown();
+        std::process::exit(1);
+    }
+    // Replay the ledger outbox into the fast journal (round 6 iter 51):
+    // at-least-once, idempotent on posting ids — a crash between post and
+    // replay loses nothing.
+    {
+        let ledger = std::sync::Arc::clone(&state.ledger);
+        tokio::spawn(async move {
+            match ledger.restore().await {
+                Ok(n) if n > 0 => tracing::info!(restored = n, "ledger outbox replayed"),
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, "ledger outbox replay failed"),
+            }
+        });
     }
     let supervisor = Arc::new(supervisor);
     let supervisor_handle = tokio::spawn(Arc::clone(&supervisor).run());

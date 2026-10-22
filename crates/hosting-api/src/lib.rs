@@ -18,6 +18,7 @@
 //! | POST | `/api/tenants/{tenant}/backup?offsite=true` | trigger backup |
 //! | GET | `/api/usage` | metered usage and price for every tenant |
 //! | GET | `/api/tenants/{tenant}/usage` | metered usage and price for one tenant |
+//! | GET | `/api/tenants/{tenant}/ledger` | durable charge statement (ledger-kit) |
 //!
 //! Secrets from `.credentials` are parsed server-side but never serialised.
 
@@ -25,6 +26,7 @@ pub mod auth;
 pub mod backup;
 pub mod error;
 pub mod jobs;
+pub mod ledger;
 pub mod nightly;
 pub mod passkeys;
 pub mod tenants;
@@ -72,6 +74,9 @@ pub struct AppState {
     pub health: std::sync::Arc<healthkit::HealthRegistry>,
     /// Metering window state and unit prices.
     pub meterer: usage::Meterer,
+    /// Durable charge journal (always on; SQLite-backed when
+    /// `HOSTING_LEDGER_DB` is set, else in-memory).
+    pub ledger: Arc<ledger::UsageLedger>,
 
     /// Total backup requests accepted.
     metric_backups_total: Counter,
@@ -137,6 +142,22 @@ impl AppState {
             .filter(|u| !u.trim().is_empty());
         let meterer = usage::Meterer::new(cadvisor_url.clone(), usage::MeteringConfig::from_env()?)
             .with_registry(registry.clone());
+        // Durable metering journal (round 6 iter 51): SQLite-backed when
+        // HOSTING_LEDGER_DB is set, in-memory otherwise. A configured-but-
+        // broken path fails the boot — a silently absent billing journal
+        // is exactly what the ledger exists to prevent. Outbox replay is
+        // spawned by main after state construction (restore is async).
+        let metering_cfg = meterer.config().clone();
+        let ledger_db = std::env::var("HOSTING_LEDGER_DB")
+            .ok()
+            .filter(|p| !p.trim().is_empty());
+        let ledger = match ledger_db.as_deref() {
+            Some(path) => Arc::new(ledger::UsageLedger::open(
+                Some(std::path::Path::new(path)),
+                &metering_cfg,
+            )?),
+            None => Arc::new(ledger::UsageLedger::open(None, &metering_cfg)?),
+        };
         Ok(Self {
             root,
             backup_script,
@@ -148,6 +169,7 @@ impl AppState {
             passkeys,
             cadvisor_url,
             meterer,
+            ledger,
             health,
             metric_backups_total,
             metric_backup_failures,
@@ -187,6 +209,7 @@ impl AppState {
             .route("/tenants/{tenant}/backup", post(trigger_backup))
             .route("/usage", get(get_usage_summary))
             .route("/tenants/{tenant}/usage", get(get_tenant_usage))
+            .route("/tenants/{tenant}/ledger", get(get_tenant_ledger))
             .route("/jobs", get(list_jobs))
             .route("/jobs/{id}", get(get_job))
             .route("/tenants/{tenant}/jobs", get(list_tenant_jobs))
@@ -636,6 +659,37 @@ async fn get_tenant_usage(
 
 async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<jobs::JobRecord>> {
     Json(state.jobs.list(None, 100).await)
+}
+
+/// `GET /api/tenants/{tenant}/ledger` — the durable charge statement:
+/// derived balance and the most recent postings. The journal, not the
+/// in-memory window, is the billing artifact (round 6 iter 51).
+async fn get_tenant_ledger(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+) -> Result<Json<serde_json::Value>, error::ApiError> {
+    state.root.tenant_dir(&tenant)?;
+    let statement = state
+        .ledger
+        .tenant_statement(&tenant, 50, state.meterer.config().currency)
+        .await
+        .map_err(|e| error::ApiError::Upstream(e.to_string()))?;
+    let (balance, postings) = statement;
+    Ok(Json(serde_json::json!({
+        "tenant": tenant,
+        "durable": state.ledger.durable(),
+        "currency": balance.balance.currency.code(),
+        "balance": balance.balance.amount.to_string(),
+        "postings": postings
+            .iter()
+            .map(|p| serde_json::json!({
+                "id": p.id().to_string(),
+                "recorded_at": p.recorded_at(),
+                "memo": p.memo(),
+                "amount": p.amount().amount.to_string(),
+            }))
+            .collect::<Vec<_>>(),
+    })))
 }
 
 async fn get_job(

@@ -77,6 +77,76 @@ fn nightly_sweep_job(
     })
 }
 
+/// Close the metering window into the durable ledger (round 6 iter 51):
+/// every tenant's accumulated window charge becomes a posting, then the
+/// in-memory window resets. Daily statements sum into the month. The
+/// ledger's idempotency key (tenant + window bounds) makes a double
+/// close a no-op, so a crash between post and reset replays safely.
+/// Runs as its own worker-kit job, AFTER the sweep, so the backup
+/// window's own CPU cost lands in the day it belongs to.
+fn metering_close_job(state: Arc<AppState>) -> Job {
+    Arc::new(move |_ctx| {
+        let state = Arc::clone(&state);
+        Box::pin(async move {
+            let totals = state.meterer.window().await;
+            let mut posted = 0usize;
+            for (tenant, usage) in &totals {
+                match state.ledger.record_window(usage, state.meterer.config()).await {
+                    Ok(Some(p)) => {
+                        posted += 1;
+                        tracing::info!(
+                            tenant = %tenant,
+                            posting = %p.id(),
+                            amount = %p.amount().amount,
+                            "metering window journalled"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Do NOT reset the window on a failed post: the
+                        // next close retries the same idempotency key.
+                        tracing::error!(tenant = %tenant, error = %e, "metering close failed");
+                        return Err(JobError::msg(format!(
+                            "metering close: {tenant}: {e}"
+                        )));
+                    }
+                }
+            }
+            state.meterer.reset_window().await;
+            if posted == 0 {
+                tracing::info!("metering close: nothing to post (empty window)");
+            } else {
+                tracing::info!(posted, "metering window closed");
+            }
+            Ok(())
+        })
+    })
+}
+
+/// Register the nightly metering window close on a supervisor.
+///
+/// # Errors
+/// Propagates `worker_kit::RegisterError` via `String`.
+pub fn register_metering_close(
+    supervisor: &mut WorkerSupervisor,
+    state: &Arc<AppState>,
+) -> Result<(), String> {
+    supervisor
+        .register(JobSpec {
+            name: "metering-window-close".to_owned(),
+            trigger: Trigger::Cron("0 15 3 * * *".to_owned()),
+            closure: metering_close_job(Arc::clone(state)),
+            failure_budget: 3,
+            leader: false,
+            fire_at_start: false,
+            drain_pass: false,
+            use_breaker: true,
+            on_degraded: None,
+        })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Register the nightly sweep on a supervisor.
 ///
 /// Cron is UTC (`worker-kit` evaluates cron in UTC); 03:30 UTC lands
