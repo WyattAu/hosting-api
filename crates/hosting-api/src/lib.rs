@@ -165,12 +165,17 @@ impl AppState {
                 let jwks_uri = std::env::var("HOSTING_OIDC_JWKS_URI")
                     .ok()
                     .filter(|u| !u.trim().is_empty());
-                let url = url::Url::parse(&issuer)
+                // Validate the URL but keep the operator's spelling:
+                // issuer comparison is string equality against the
+                // token's iss claim, and Url::parse adds a trailing "/"
+                // to root-only issuers — which silently broke iss
+                // matching (round 8 iter 69, live probe).
+                url::Url::parse(&issuer)
                     .map_err(|e| error::ApiError::Config(format!("HOSTING_OIDC_ISSUER: {e}")))?;
                 Ok::<_, error::ApiError>(std::sync::Arc::new(
                     oauth_toolkit::oidc_validator::OidcValidator::new(
                         oauth_toolkit::oidc_validator::OidcValidatorConfig {
-                            issuer: url.to_string(),
+                            issuer,
                             audience,
                             jwks_uri,
                         },
