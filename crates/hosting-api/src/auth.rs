@@ -48,6 +48,22 @@ pub struct RealmRoles {
     pub roles: Vec<String>,
 }
 
+/// True when the token's roles grant Admin privilege under the estate
+/// RBAC vocabulary (`accessctl`): a role parses into the hierarchy and
+/// is `>= Admin`. Unknown role names are skipped, not errors — a token
+/// with no recognized Admin-grade role simply fails the check.
+fn grants_admin(roles: &[String]) -> bool {
+    roles.iter().any(|raw| {
+        match raw.to_ascii_lowercase().as_str() {
+            "admin" => Some(accessctl::Role::Admin),
+            "editor" => Some(accessctl::Role::Editor),
+            "viewer" => Some(accessctl::Role::Viewer),
+            _ => None,
+        }
+        .is_some_and(|role| role.has_at_least(&accessctl::Role::Admin))
+    })
+}
+
 /// Constant-time byte comparison (no early exit on mismatch).
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -93,7 +109,7 @@ pub async fn oidc_admin(state: &AppState, headers: &HeaderMap) -> Option<bool> {
         claims
             .realm_access
             .as_ref()
-            .is_some_and(|r| r.roles.iter().any(|role| role == "Admin"))
+            .is_some_and(|r| grants_admin(&r.roles))
     });
     Some(granted)
 }

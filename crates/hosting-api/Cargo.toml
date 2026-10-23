@@ -20,6 +20,7 @@ outbox-kit.workspace = true
 rust_decimal = "1"
 healthkit.workspace = true
 oauth-toolkit.workspace = true
+accessctl.workspace = true
 url.workspace = true
 throttle-kit.workspace = true
 envstack.workspace = true

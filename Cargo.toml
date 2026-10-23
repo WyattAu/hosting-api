@@ -38,6 +38,7 @@ ledger-kit = "0.1"   # double-entry journal for closed metering windows
 outbox-kit = { version = "0.2", features = ["sqlite"] }  # durable outbox behind the ledger
 healthkit = "1.2"    # liveness/readiness routes (estate dogfood)
 oauth-toolkit = "0.4" # OIDC validation for /api JWTs (estate issuer: authbox)
+accessctl = "0.1"   # estate RBAC role vocabulary (Admin gate)
 url = "2"            # issuer URL validation
 throttle-kit = { version = "1.1", features = ["tower"] }  # estate GCRA (dir: ratelimit)    # GCRA edge protection (estate dogfood)
 envstack = "0.2"     # layered config (estate dogfood)
