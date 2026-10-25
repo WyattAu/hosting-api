@@ -128,8 +128,17 @@ fn fake_backup_script(dir: &Path, exit_code: i32) -> PathBuf {
 }
 
 async fn serve(root: PathBuf, backup_script: PathBuf) -> String {
+    serve_with_ledger(root, backup_script, None).await
+}
+
+async fn serve_with_ledger(
+    root: PathBuf,
+    backup_script: PathBuf,
+    ledger_db: Option<PathBuf>,
+) -> String {
     let registry = Arc::new(Registry::new());
     let jobs_dir = tempfile::tempdir().expect("jobs tmp");
+    let _ = &ledger_db;
     let state = Arc::new(
         AppState::new(
             root,
@@ -674,4 +683,79 @@ async fn authbox_issued_jwt_grants_api_access_by_role() {
         .await
         .expect("request");
     assert_eq!(res.status(), 200, "legacy token must keep working");
+}
+
+/// The ledger endpoint serves the durable charge statement through the
+/// real router (round 8 iter 75): a posting recorded on the state's
+/// ledger must appear in the HTTP response with the derived balance.
+#[tokio::test]
+async fn ledger_endpoint_serves_recorded_windows() {
+    #![allow(clippy::indexing_slicing)]
+    use hosting_api::usage::{MeteringConfig, TenantUsage};
+
+    let (_guard, root) = fixture_root(true);
+    let tmp = tempfile::tempdir().expect("script tmp");
+    let script = fake_backup_script(tmp.path(), 0);
+    let registry = Arc::new(Registry::new());
+    let jobs_dir = tempfile::tempdir().expect("jobs tmp");
+    let state = Arc::new(
+        AppState::new(
+            root,
+            script,
+            registry,
+            jobs_dir.path().to_path_buf(),
+            Some("test-token".to_string()),
+            false,
+        )
+        .expect("state from fixture"),
+    );
+
+    // Record one closed metering window directly on the state's ledger.
+    let cfg = MeteringConfig {
+        currency: billing_kit::Currency::GBP,
+        cpu_price_per_core_hour: rust_decimal::Decimal::from(1),
+        memory_price_per_gib_hour: rust_decimal::Decimal::ZERO,
+        discount_percent: rust_decimal::Decimal::ZERO,
+    };
+    let usage = TenantUsage {
+        tenant: "acme".to_string(),
+        window_start: chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("ts"),
+        window_end: chrono::DateTime::from_timestamp(1_700_000_000 + 3600, 0).expect("ts"),
+        cpu_core_seconds: rust_decimal::Decimal::from(3600), // 1 core-hour = £0.01
+        memory_gibibyte_seconds: rust_decimal::Decimal::ZERO,
+    };
+    let posting = state
+        .ledger
+        .record_window(&usage, &cfg)
+        .await
+        .expect("record window")
+        .expect("posting accepted");
+
+    let server = TestServer::new(state.router()).await;
+    let base = server.base_url();
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/tenants/acme/ledger"))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(body["tenant"], "acme");
+    let postings = body["postings"].as_array().expect("postings array");
+    assert_eq!(postings.len(), 1, "the recorded window appears");
+    assert_eq!(
+        postings[0]["id"],
+        posting.id().to_string(),
+        "the posting id round-trips"
+    );
+
+    // Unknown tenants are 404 (the fixture root only knows acme).
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/tenants/ghost/ledger"))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(res.status(), 404);
 }
