@@ -503,6 +503,10 @@ pub struct Meterer {
     collector: tokio::sync::Mutex<UsageCollector>,
     gauges: tokio::sync::RwLock<HashMap<String, TenantGauges>>,
     registry: Option<std::sync::Arc<metrics_kit::Registry>>,
+    /// True when the host is under memory pressure (PSI avg60 >=
+    /// threshold): metering scrapes are deferred to avoid competing
+    /// with tenant workloads for scarce CPU/RAM (round 8 iter 82).
+    pressure: std::sync::atomic::AtomicBool,
 }
 
 impl Meterer {
@@ -516,7 +520,22 @@ impl Meterer {
             collector: tokio::sync::Mutex::new(UsageCollector::new()),
             gauges: tokio::sync::RwLock::new(HashMap::new()),
             registry: None,
+            pressure: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Set the pressure flag. When true, `refresh` returns cached
+    /// totals without scraping cAdvisor, so the metering pipeline
+    /// yields to tenant workloads during host memory pressure.
+    pub fn set_pressure(&self, under_pressure: bool) {
+        self.pressure
+            .store(under_pressure, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// True when the host is under memory pressure.
+    #[must_use]
+    pub fn under_pressure(&self) -> bool {
+        self.pressure.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Attach a Prometheus registry so tenant gauges are exported.
@@ -561,6 +580,13 @@ impl Meterer {
         let Some(url) = self.cadvisor_url.as_deref() else {
             return Ok(self.window().await);
         };
+        // Host memory pressure: yield the scrape to tenant workloads
+        // (round 8 iter 82 — the consumption half of the systemd
+        // pressure protocol, using the pressure flag set externally).
+        if self.under_pressure() {
+            tracing::debug!("metering scrape deferred: host under memory pressure");
+            return Ok(self.window().await);
+        }
         let text = fetch_exposition(url).await?;
         let samples = parse_cadvisor(&text);
         let mut collector = self.collector.lock().await;
@@ -859,6 +885,24 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
             "10 core-seconds per interval, 3 intervals"
         );
         assert_eq!(c.totals().get("acme").map(|u| u.window_end), Some(at(30)));
+    }
+
+    #[test]
+    fn pressure_defers_scrape_but_keeps_cached_totals() {
+        #![allow(clippy::unwrap_used, clippy::expect_used)]
+        let m = Meterer::new(
+            Some("http://127.0.0.1:19999".to_string()),
+            cfg_zero_discount(),
+        );
+        m.set_pressure(true);
+        assert!(m.under_pressure());
+        // refresh under pressure must NOT attempt a scrape — returns cached.
+        let totals = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(async { m.refresh(&["acme".to_string()]).await });
+        assert!(totals.is_ok(), "refresh under pressure returns cached totals");
+        m.set_pressure(false);
+        assert!(!m.under_pressure());
     }
 
     #[test]
