@@ -379,9 +379,7 @@ fn loopback_net() -> throttle_kit::IpNet {
 #[cfg(unix)]
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
 }
 
 /// Edge-forwarded identity for the audit trail. Only meaningful when
@@ -407,13 +405,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     let mut up = 0u64;
     for tenant in &tenants {
         if let Ok(creds) = state.root.credentials(tenant) {
-            if state
-                .root
-                .status(tenant)
-                .await
-                .map(|s| s.healthy)
-                .unwrap_or(false)
-            {
+            if state.root.status(tenant).await.is_ok_and(|s| s.healthy) {
                 up += 1;
                 tracing::debug!(tenant = %creds.tenant, domain = %creds.domain, "tenant healthy");
             }

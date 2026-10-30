@@ -223,8 +223,7 @@ impl TenantRoot {
     #[must_use]
     pub fn suspended(&self, tenant: &str) -> bool {
         self.tenant_dir(tenant)
-            .map(|dir| dir.join(".suspended").exists())
-            .unwrap_or(false)
+            .is_ok_and(|dir| dir.join(".suspended").exists())
     }
 }
 

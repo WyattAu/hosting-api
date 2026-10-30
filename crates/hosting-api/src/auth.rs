@@ -105,7 +105,7 @@ pub async fn oidc_admin(state: &AppState, headers: &HeaderMap) -> Option<bool> {
         Ok(c) => tracing::debug!(sub = %c.sub, "OIDC token validated"),
         Err(e) => tracing::debug!(error = %e, "OIDC token rejected"),
     }
-    let granted = verdict.ok().is_some_and(|claims| {
+    let granted = verdict.is_ok_and(|claims| {
         claims
             .realm_access
             .as_ref()
