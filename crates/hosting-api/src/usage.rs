@@ -900,7 +900,10 @@ container_memory_working_set_bytes{container="",id="/",image="",name=""} 1073741
         let totals = tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(async { m.refresh(&["acme".to_string()]).await });
-        assert!(totals.is_ok(), "refresh under pressure returns cached totals");
+        assert!(
+            totals.is_ok(),
+            "refresh under pressure returns cached totals"
+        );
         m.set_pressure(false);
         assert!(!m.under_pressure());
     }
