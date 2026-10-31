@@ -4,7 +4,7 @@ Control-plane API for the [WyattAu hosting platform](https://github.com/WyattAu/
 tenant state, backup triggers, and Prometheus metrics over the on-disk tenant
 layout that `ops/tenant-provision.sh` produces.
 
-Part of the WyattAu estate — **dogfoods the estate's own crates**:
+Part of the WyattAu estate; **dogfoods the estate's own crates**:
 
 | Crate | Role here |
 | --- | --- |
@@ -15,7 +15,7 @@ Part of the WyattAu estate — **dogfoods the estate's own crates**:
 ## Deployment
 
 Runs on `docker01` (the tenant Docker host, see
-`.docs/hosting-architecture.md` in SIS). Binds `127.0.0.1:8484` by design —
+`.docs/hosting-architecture.md` in SIS). Binds `127.0.0.1:8484` by design -
 **this API has no authentication of its own**; the edge proxy in front of it
 must authenticate before exposing it. Exposing it directly is a
 misconfiguration.
@@ -41,7 +41,7 @@ TENANT_ROOT=/srv/tenants HOSTING_LISTEN=127.0.0.1:8484 hosting-api
 Per-tenant usage is scraped from cAdvisor (`container_cpu_usage_seconds_total`
 for CPU; memory integrated over the scrape interval from
 `container_memory_rss`, falling back to `container_memory_working_set_bytes`
-when RSS is unavailable — RSS is billing-grade because it excludes page
+when RSS is unavailable; RSS is billing-grade because it excludes page
 cache the kernel holds on the tenant's behalf) and attributed by Docker
 Compose's
 `<project>-<service>-<index>` naming, where the project equals the tenant slug.
@@ -64,7 +64,7 @@ Exported series: `hosting_tenant_cpu_core_seconds`,
 labelled with `tenant`.
 
 Credentials metadata is parsed from each tenant's `.credentials` but secrets
-are **structurally excluded** from the API's types — they cannot leak because
+are **structurally excluded** from the API's types; they cannot leak because
 no field exists to carry them (enforced by tests).
 
 ## Development
@@ -93,12 +93,12 @@ Apache-2.0
   metering windows post to a double-entry ledger mirrored into a
   SQLite outbox (`HOSTING_LEDGER_DB`); crash-safe replay at boot; the
   journal is the billing artifact.
-- **`GET /api/tenants/{t}/ledger`** — derived balance + postings.
+- **`GET /api/tenants/{t}/ledger`**; derived balance + postings.
 - **Nightly metering window close** (worker-kit cron 03:15 UTC, after
   the sweep); a failed post does not reset the window (idempotent
   retry).
 - **FIX**: `load_config` queried envstack with uppercase keys, which
-  silently resolved to `None` (envstack lowercases its layer tree) —
+  silently resolved to `None` (envstack lowercases its layer tree) -
   the API booted with `HOSTING_API_TOKEN`/`TENANT_ROOT` ignored.
   Consumer-side fix; envstack also gained a case-insensitive lookup
   fallback (0.2.2).
