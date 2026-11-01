@@ -14,3 +14,7 @@ jobs:
       loom: false
       wasm: false
       miri: false
+      # main.rs is axum bootstrap glue (bind+serve, untestable without a
+      # full server harness); nightly.rs closures need a live AppState —
+      # both tracked for integration-test coverage in the SIS loop backlog.
+      coverage-ignore-regex: "(main|nightly)\\.rs$"
