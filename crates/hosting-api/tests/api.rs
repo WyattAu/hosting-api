@@ -484,18 +484,30 @@ async fn api_rate_limit_engages_gcra() {
     let base = serve(root, script).await;
     let client = reqwest::Client::new();
 
-    // The tests run fast enough that >10 requests land inside the burst
-    // window; at least one must draw a 429 with the throttle-kit body.
-    let mut codes = Vec::new();
+    // The 14 requests are dispatched CONCURRENTLY so they land inside
+    // the same GCRA quota period regardless of machine speed: under a
+    // coverage build with --test-threads=1, sequential requests straddle
+    // the 1s refill and the burst never engages (a real flake the
+    // coverage job exposed).
+    let mut handles = Vec::new();
     for _ in 0..14 {
-        let res = client
-            .get(format!("{base}/api/tenants"))
-            .header("X-Forwarded-For", "203.0.113.7")
-            .bearer_auth("test-token")
-            .send()
-            .await
-            .expect("request");
-        codes.push(res.status().as_u16());
+        let client = client.clone();
+        let base = base.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .get(format!("{base}/api/tenants"))
+                .header("X-Forwarded-For", "203.0.113.7")
+                .bearer_auth("test-token")
+                .send()
+                .await
+                .expect("request")
+                .status()
+                .as_u16()
+        }));
+    }
+    let mut codes = Vec::new();
+    for h in handles {
+        codes.push(h.await.expect("join"));
     }
     assert!(
         codes.contains(&429),
