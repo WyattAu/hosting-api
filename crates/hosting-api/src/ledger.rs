@@ -314,7 +314,7 @@ mod tests {
             .tenant_statement("acme", 10, cfg().currency)
             .await
             .expect("zero-history tenant still gets a statement");
-        assert!(postings.is_empty());
+        assert_eq!(postings, Vec::new());
         assert_eq!(balance.balance.amount, Decimal::ZERO);
     }
 
