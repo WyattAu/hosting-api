@@ -9,12 +9,15 @@ jobs:
   quality:
     uses: WyattAu/engineering-standards/.github/workflows/rust-kit.yml@main
     with:
-      # TEMPORARY tier c (70%): llvm-cov 0.9.1's --fail-under-lines
-      # evaluates FUNCTION coverage (78.41%), not lines (80.43%) — the
-      # flag name misleads. Tier b returns after the ledger/passkey/
-      # handler integration tests execute the remaining ~38 functions
-      # (SIS loop backlog, iteration 18).
-      tier: c
+      # Tier b restored (iteration 20): seven integration tests
+      # (readiness over the real dependency registry, the jobs read
+      # surface, tenant detail, the empty-ledger statement, and the
+      # passkey not-configured paths) took line coverage 78.41% ->
+      # 82.38%. The 18b diagnosis was corrected: llvm-cov's flag was
+      # fine — the text table's first column is REGIONS (80.43%),
+      # lines were genuinely 78.41%. Functions sit at 76.47%; closing
+      # them is future work, not a gate.
+      tier: b
       all-features: true
       loom: false
       wasm: false

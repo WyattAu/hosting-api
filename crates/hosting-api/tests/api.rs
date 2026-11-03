@@ -139,12 +139,19 @@ async fn serve_with_ledger(
     let registry = Arc::new(Registry::new());
     let jobs_dir = tempfile::tempdir().expect("jobs tmp");
     let _ = &ledger_db;
+    // The job store must outlive the server: /readyz checks its
+    // writability per request, and the TempDir guard would otherwise
+    // delete the directory the moment this function returns. Capture
+    // the path, then forget the OWNED guard (forgetting a reference
+    // would be a no-op ownership-wise).
+    let jobs_dir_path = jobs_dir.path().to_path_buf();
+    std::mem::forget(jobs_dir);
     let state = Arc::new(
         AppState::new(
             root,
             backup_script,
             registry,
-            jobs_dir.path().to_path_buf(),
+            jobs_dir_path,
             Some("test-token".to_string()),
             false,
         )
@@ -770,4 +777,158 @@ async fn ledger_endpoint_serves_recorded_windows() {
         .await
         .expect("request");
     assert_eq!(res.status(), 404);
+}
+
+// --- iteration 20: the uncovered surface --------------------------------
+//
+// These exercises close the tier-b gap: readiness over the real
+// dependency registry, the jobs read surface, tenant detail, the
+// empty-ledger statement, and every passkey ceremony's not-configured
+// path. Each test stands alone (own server, own fixture root).
+
+#[tokio::test]
+async fn readyz_reports_real_dependency_health() {
+    let (_guard, root) = fixture_root(true);
+    let tmp = tempfile::tempdir().expect("tmp");
+    let script = fake_backup_script(tmp.path(), 0);
+    let url = serve(root, script).await;
+
+    // Healthy: backup script exists+executable, job store writable.
+    let (status, body) = {
+        let res = reqwest::Client::new()
+            .get(format!("{url}/readyz"))
+            .send()
+            .await
+            .expect("GET /readyz");
+        (res.status().as_u16(), res.text().await.expect("body"))
+    };
+    assert_eq!(status, 200, "ready body: {body}");
+    assert!(body.contains("backup-script"), "checks: {body}");
+    assert!(body.contains("\"healthy\""), "checks: {body}");
+}
+
+#[tokio::test]
+async fn readyz_is_503_when_the_backup_script_is_missing() {
+    let (_guard, root) = fixture_root(true);
+    // A script path that does not exist fails the backup-script check.
+    let url = serve(root, PathBuf::from("/nonexistent/tenant-backup.sh")).await;
+    let status = {
+        let res = reqwest::Client::new()
+            .get(format!("{url}/readyz"))
+            .send()
+            .await
+            .expect("GET /readyz");
+        res.status().as_u16()
+    };
+    assert_eq!(status, 503, "unhealthy dependency must fail readiness");
+}
+
+#[tokio::test]
+async fn passkey_ceremonies_are_503_without_configuration() {
+    let (_guard, root) = fixture_root(true);
+    let url = serve(root, PathBuf::from("/bin/true")).await;
+
+    // All five ceremonies answer with the same NotConfigured contract
+    // when the deployment has no HOSTING_PASSKEY_* env.
+    for path in [
+        "/api/auth/passkey/register/begin",
+        "/api/auth/passkey/register/finish",
+        "/api/auth/passkey/login/begin",
+        "/api/auth/passkey/login/finish",
+    ] {
+        let status = reqwest::Client::new()
+            .request(reqwest::Method::POST, format!("{url}{path}"))
+            .bearer_auth("test-token")
+            .header("Content-Type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .expect("passkey request")
+            .status()
+            .as_u16();
+        assert_eq!(status, 503, "POST {path} must be not-configured");
+    }
+    let me = reqwest_status(&format!("{url}/api/auth/passkey/me")).await;
+    assert_eq!(me, 503, "GET /me must be not-configured");
+}
+
+#[tokio::test]
+async fn jobs_surface_lists_and_details_records() {
+    let (_guard, root) = fixture_root(true);
+    let tmp = tempfile::tempdir().expect("tmp");
+    let script = fake_backup_script(tmp.path(), 0);
+    let url = serve(root, script).await;
+
+    // Before any job: the list is valid JSON (empty array).
+    let empty = reqwest_get(&format!("{url}/api/jobs")).await;
+    assert_eq!(empty, "[]", "no jobs yet: {empty}");
+
+    // Run one backup, then the job appears in both list surfaces.
+    let body = reqwest_post(&format!("{url}/api/tenants/acme/backup")).await;
+    let job_id = extract_job_id(&body);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let record = reqwest_get(&format!("{url}/api/jobs/{job_id}")).await;
+        if record.contains("succeeded") || record.contains("failed") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job never finished: {record}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let all = reqwest_get(&format!("{url}/api/jobs")).await;
+    assert!(all.contains(&job_id), "global list holds the job: {all}");
+    let per_tenant = reqwest_get(&format!("{url}/api/tenants/acme/jobs")).await;
+    assert!(
+        per_tenant.contains(&job_id),
+        "tenant list holds the job: {per_tenant}"
+    );
+    // Tenant isolation: globex's list does not claim acme's job.
+    let globex = reqwest_get(&format!("{url}/api/tenants/globex/jobs")).await;
+    assert!(
+        !globex.contains(&job_id),
+        "globex must not see acme's job: {globex}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_job_id_is_404() {
+    let (_guard, root) = fixture_root(true);
+    let url = serve(root, PathBuf::from("/bin/true")).await;
+    let status = reqwest_status(&format!("{url}/api/jobs/no-such-job")).await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn tenant_detail_reports_status_without_secrets() {
+    let (_guard, root) = fixture_root(true);
+    let url = serve(root, PathBuf::from("/bin/true")).await;
+    let body = reqwest_get(&format!("{url}/api/tenants/acme")).await;
+    assert!(body.contains("\"tenant\":\"acme\""), "detail: {body}");
+    assert!(body.contains("\"healthy\""), "status present: {body}");
+    assert!(!body.contains("neverleak"), "secret leaked: {body}");
+    assert!(!body.contains("alsonot"), "secret leaked: {body}");
+}
+
+#[tokio::test]
+async fn ledger_statement_is_empty_before_the_first_window() {
+    #![allow(clippy::indexing_slicing)]
+    let (_guard, root) = fixture_root(true);
+    let url = serve(root, PathBuf::from("/bin/true")).await;
+    let body = reqwest_get(&format!("{url}/api/tenants/globex/ledger")).await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["tenant"], "globex");
+    assert_eq!(
+        v["postings"].as_array().expect("postings").len(),
+        0,
+        "no windows recorded yet: {body}"
+    );
+    assert_eq!(
+        v["durable"],
+        serde_json::Value::Bool(false),
+        "in-memory ledger without HOSTING_LEDGER_DB"
+    );
 }
