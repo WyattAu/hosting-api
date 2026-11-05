@@ -1,2 +1,5 @@
 /target
 Cargo.lock
+
+# local CI-vendoring artifact
+.cargo/

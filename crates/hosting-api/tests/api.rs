@@ -964,7 +964,7 @@ fn configured_passkey_state(dir: &Path) -> PasskeyState {
     }
 }
 
-/// AppState with a configured PasskeyState; its store file lives in a
+/// [`AppState`] with a configured [`PasskeyState`]; its store file lives in a
 /// leaked tempdir (the passkey-app tests never exercise /readyz).
 fn passkey_app() -> hosting_api::AppState {
     let mut state = {
@@ -1033,7 +1033,7 @@ async fn passkey_register_begin_mints_a_single_use_challenge() {
 
 #[tokio::test]
 async fn passkey_second_registration_requires_authority() {
-    let mut state = passkey_app();
+    let state = passkey_app();
     if let Some(pk) = state.passkeys.as_ref() {
         pk.store.add("admin", seeded_credential()).await;
     }
@@ -1066,7 +1066,8 @@ fn seeded_credential() -> WebauthnCredential {
 
 #[tokio::test]
 async fn passkey_me_resolves_a_live_session_and_404s_without_one() {
-    let mut state = passkey_app();
+    #![allow(clippy::indexing_slicing)]
+    let state = passkey_app();
     let token = state
         .passkeys
         .as_ref()
@@ -1092,6 +1093,7 @@ async fn passkey_me_resolves_a_live_session_and_404s_without_one() {
 
 #[tokio::test]
 async fn passkey_register_finish_rejects_a_garbage_response() {
+    #![allow(clippy::indexing_slicing)]
     let base = TestServer::new(Arc::new(passkey_app()).router())
         .await
         .base_url();
