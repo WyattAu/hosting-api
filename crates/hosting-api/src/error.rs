@@ -40,6 +40,17 @@ pub enum ApiError {
     /// (e.g. passkeys without `HOSTING_PASSKEY_*` env).
     #[error("not configured on this deployment")]
     NotConfigured,
+
+    /// The caller sent something invalid (bad username, unparseable
+    /// ceremony response, unknown/expired challenge) — a client fault,
+    /// not a server one. `Config` would map this to 500.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
+    /// The caller lacks the authority for this action (e.g. passkey
+    /// registration after bootstrap without a session or bearer).
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 impl IntoResponse for ApiError {
@@ -54,6 +65,8 @@ impl IntoResponse for ApiError {
             ApiError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "io_error"),
             ApiError::NotConfigured => (StatusCode::SERVICE_UNAVAILABLE, "not_configured"),
             ApiError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
+            ApiError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid_input"),
+            ApiError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
         };
         // BackupInProgress is really 409; adjust before responding.
         let status = if matches!(self, ApiError::BackupInProgress(_)) {

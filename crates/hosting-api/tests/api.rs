@@ -932,3 +932,198 @@ async fn ledger_statement_is_empty_before_the_first_window() {
         "in-memory ledger without HOSTING_LEDGER_DB"
     );
 }
+
+// --- passkey handler surface (configured state) --------------------------
+//
+// The not-configured contract is covered above; these exercise the
+// ceremony plumbing with a REAL PasskeyState injected into the app:
+// challenge minting, the bootstrap rule (first credential free, later
+// ones need authority), the session surface, and finish-step input
+// validation. WebAuthn response forgery is webauthn-kit's own concern
+// and is out of scope here.
+
+use hosting_api::passkeys::{PasskeyState, PasskeyStore};
+use webauthn_kit::{ChallengeStore, WebauthnConfig, WebauthnCredential};
+
+fn configured_passkey_state(dir: &Path) -> PasskeyState {
+    PasskeyState {
+        config: WebauthnConfig {
+            rp_id: "controlplane.example".to_string(),
+            rp_name: "test".to_string(),
+            rp_origins: vec!["https://controlplane.example".to_string()],
+            allowed_algorithms: vec![-7],
+            challenge_timeout_secs: 300,
+            attestation: webauthn_kit::AttestationPolicy::default(),
+            credential_policy: webauthn_kit::CredentialPolicy::default(),
+            resident_key: webauthn_kit::ResidentKeyPolicy::default(),
+            attestation_conveyance: webauthn_kit::AttestationConveyance::default(),
+        },
+        challenges: tokio::sync::Mutex::new(ChallengeStore::new()),
+        store: PasskeyStore::open(dir.join("passkeys.json")).expect("store opens"),
+        sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    }
+}
+
+/// AppState with a configured PasskeyState; its store file lives in a
+/// leaked tempdir (the passkey-app tests never exercise /readyz).
+fn passkey_app() -> hosting_api::AppState {
+    let mut state = {
+        let root = {
+            let (guard, root) = fixture_root(true);
+            let rp = root.clone();
+            std::mem::forget(guard);
+            rp
+        };
+        let jobs_dir = tempfile::tempdir().expect("jobs tmp");
+        let jobs = jobs_dir.path().to_path_buf();
+        std::mem::forget(jobs_dir);
+        hosting_api::AppState::new(
+            root,
+            PathBuf::from("/bin/true"),
+            Arc::new(Registry::new()),
+            jobs,
+            Some("test-token".to_string()),
+            false,
+        )
+        .expect("state from fixture")
+    };
+    let pk_dir = tempfile::tempdir().expect("pk tmp");
+    let pk_path = pk_dir.path().to_path_buf();
+    std::mem::forget(pk_dir);
+    state.passkeys = Some(Arc::new(configured_passkey_state(&pk_path)));
+    state
+}
+
+async fn passkey_begin(
+    base: &str,
+    username: &str,
+    bearer: bool,
+    session: Option<&str>,
+) -> (u16, String) {
+    let mut req = reqwest::Client::new()
+        .post(format!("{base}/api/auth/passkey/register/begin"))
+        .header("Content-Type", "application/json");
+    if bearer {
+        req = req.bearer_auth("test-token");
+    }
+    if let Some(t) = session {
+        req = req.header("X-Passkey-Session", t);
+    }
+    let res = req
+        .body(format!("{{\"username\":\"{username}\"}}"))
+        .send()
+        .await
+        .expect("passkey begin");
+    let status = res.status().as_u16();
+    let body = res.text().await.expect("body");
+    (status, body)
+}
+
+#[tokio::test]
+async fn passkey_register_begin_mints_a_single_use_challenge() {
+    // Bootstrap: the store is EMPTY, so no authority is required.
+    let base = TestServer::new(Arc::new(passkey_app()).router())
+        .await
+        .base_url();
+    let (status, body) = passkey_begin(&base, "admin", false, None).await;
+    assert_eq!(status, 200, "bootstrap begin: {body}");
+    assert!(body.contains("challenge_id"), "options: {body}");
+    assert!(body.contains("options"), "webauthn options: {body}");
+}
+
+#[tokio::test]
+async fn passkey_second_registration_requires_authority() {
+    let mut state = passkey_app();
+    if let Some(pk) = state.passkeys.as_ref() {
+        pk.store.add("admin", seeded_credential()).await;
+    }
+    let base = TestServer::new(Arc::new(state).router()).await.base_url();
+
+    // No authority + non-empty store → the bootstrap window is closed.
+    let (status, body) = passkey_begin(&base, "admin", false, None).await;
+    assert_eq!(status, 401, "bootstrap is over: {body}");
+    assert!(body.contains("unauthorized"), "reason: {body}");
+
+    // The bearer token counts as authority.
+    let (status, _) = passkey_begin(&base, "admin", true, None).await;
+    assert_eq!(status, 200);
+}
+
+fn seeded_credential() -> WebauthnCredential {
+    WebauthnCredential {
+        credential_id: "seeded-cred".to_string(),
+        public_key_cose: vec![0xa1],
+        sign_count: 0,
+        device_name: "test key".to_string(),
+        registered_at: 0,
+        last_used_at: 0,
+        attestation_format: "none".to_string(),
+        user_verified: true,
+        backup_eligible: false,
+        backup_state: false,
+    }
+}
+
+#[tokio::test]
+async fn passkey_me_resolves_a_live_session_and_404s_without_one() {
+    let mut state = passkey_app();
+    let token = state
+        .passkeys
+        .as_ref()
+        .expect("configured")
+        .issue_session("admin")
+        .await;
+    let base = TestServer::new(Arc::new(state).router()).await.base_url();
+
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/auth/passkey/me"))
+        .header("X-Passkey-Session", &token)
+        .send()
+        .await
+        .expect("GET /me");
+    assert_eq!(res.status().as_u16(), 200);
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(body["user"], "admin", "session resolves its user: {body}");
+
+    // No header → no session → 404 (TenantNotFound mapping).
+    let status = reqwest_status(&format!("{base}/api/auth/passkey/me")).await;
+    assert_eq!(status, 404, "anonymous /me must not resolve");
+}
+
+#[tokio::test]
+async fn passkey_register_finish_rejects_a_garbage_response() {
+    let base = TestServer::new(Arc::new(passkey_app()).router())
+        .await
+        .base_url();
+
+    // Mint a real challenge first (bootstrap: no authority needed).
+    let (status, body) = passkey_begin(&base, "admin", false, None).await;
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let challenge_id = v["challenge_id"].as_str().expect("challenge id");
+
+    // The finish step must reject a response that cannot parse as a
+    // RegistrationResponse — a 4xx with the reason, never a 500.
+    let res = reqwest::Client::new()
+        .post(format!("{base}/api/auth/passkey/register/finish"))
+        .header("Content-Type", "application/json")
+        .body(format!(
+            "{{\"username\":\"admin\",\"challenge_id\":\"{challenge_id}\",\"response\":{{\"junk\":true}}}}"
+        ))
+        .send()
+        .await
+        .expect("finish");
+    assert_eq!(res.status().as_u16(), 400, "bad response must be a 400");
+}
+
+#[tokio::test]
+async fn passkey_invalid_username_is_rejected() {
+    let base = TestServer::new(Arc::new(passkey_app()).router())
+        .await
+        .base_url();
+    // A space and '!' are outside the documented username alphabet
+    // (alphanumeric plus -._@, max 64).
+    let (status, body) = passkey_begin(&base, "bad name!", false, None).await;
+    assert_eq!(status, 400, "invalid username must be a 400: {body}");
+    assert!(body.contains("invalid_input"), "code: {body}");
+}

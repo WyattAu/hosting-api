@@ -525,7 +525,7 @@ async fn pk_register_begin(
                 && u.chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-._@".contains(c))
         })
-        .ok_or_else(|| error::ApiError::Config("invalid username".to_string()))?;
+        .ok_or_else(|| error::ApiError::InvalidInput("invalid username".to_string()))?;
     // Bootstrap rule: the FIRST credential needs no auth (otherwise an
     // unconfigured platform could never be set up); later registrations
     // require the bearer token or an existing passkey session. These
@@ -539,7 +539,7 @@ async fn pk_register_begin(
         None => None,
     };
     if !pk.may_register(bearer_ok, session_user.as_deref()).await {
-        return Err(error::ApiError::Config(
+        return Err(error::ApiError::Unauthorized(
             "registration requires an existing session (bootstrap credential already enrolled)"
                 .to_string(),
         ));
@@ -567,7 +567,7 @@ async fn pk_register_finish(
             .cloned()
             .unwrap_or(serde_json::Value::Null),
     )
-    .map_err(|e| error::ApiError::Config(format!("bad response: {e}")))?;
+    .map_err(|e| error::ApiError::InvalidInput(format!("bad response: {e}")))?;
     Ok(Json(
         passkeys::register_finish(pk, username, challenge_id, &response).await?,
     ))
@@ -607,7 +607,7 @@ async fn pk_login_finish(
             .cloned()
             .unwrap_or(serde_json::Value::Null),
     )
-    .map_err(|e| error::ApiError::Config(format!("bad response: {e}")))?;
+    .map_err(|e| error::ApiError::InvalidInput(format!("bad response: {e}")))?;
     Ok(Json(
         passkeys::login_finish(pk, username, challenge_id, &response).await?,
     ))
